@@ -1,20 +1,24 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { asset } from "./base";
 
 const loader = new GLTFLoader();
 const sceneCache = new Map<string, Promise<THREE.Group>>();
 
+// Callers pass root-absolute paths ("/models/…"); asset() makes them base-aware
+// so the models resolve under any host prefix. Cache by the resolved URL.
 export function loadScene(url: string): Promise<THREE.Group> {
-  let p = sceneCache.get(url);
+  const resolved = asset(url);
+  let p = sceneCache.get(resolved);
   if (!p) {
-    p = loader.loadAsync(url).then((gltf) => gltf.scene);
-    sceneCache.set(url, p);
+    p = loader.loadAsync(resolved).then((gltf) => gltf.scene);
+    sceneCache.set(resolved, p);
   }
   return p;
 }
 
 export function loadGLTF(url: string) {
-  return loader.loadAsync(url);
+  return loader.loadAsync(asset(url));
 }
 
 // Kenney models are KHR_materials_unlit (flat color, no texture). Convert to a

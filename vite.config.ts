@@ -11,6 +11,11 @@ declare const process: { env: Record<string, string | undefined> };
 // can run alongside the first without fighting over the port.
 const envPort = Number(process.env.PORT) || 0;
 export default defineConfig({
+  // Relative base: every asset URL in the built output (and, via asset() in
+  // base.ts, the runtime-fetched models/music/sfx) resolves relative to the page
+  // rather than the domain root. One build then runs anywhere — GitHub Pages'
+  // /own_game/ subpath, an itch.io iframe, Netlify's root, and Tauri alike.
+  base: "./",
   clearScreen: false,
   server: {
     port: envPort || 1420,

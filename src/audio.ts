@@ -11,6 +11,8 @@
 // gesture, so play() only records intent until unlock() is called from one.
 // ---------------------------------------------------------------------------
 
+import { asset } from "./base";
+
 export type Track = "menu" | "meadow" | "frenzy" | "victory";
 
 interface TrackDef {
@@ -54,7 +56,7 @@ export function createAudio(): AudioManager {
   let raf = 0;
 
   for (const t of ALL) {
-    const el = new Audio(TRACKS[t].url);
+    const el = new Audio(asset(TRACKS[t].url));
     el.loop = true;
     el.preload = "auto";
     el.volume = 0;

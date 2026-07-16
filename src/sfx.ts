@@ -14,6 +14,8 @@
 // Audio is the right tool for short overlapping one-shots with variation.
 // ---------------------------------------------------------------------------
 
+import { asset } from "./base";
+
 const GENERAL_URLS = [
   "/sfx/impact-1.mp3",
   "/sfx/impact-2.mp3",
@@ -106,7 +108,7 @@ export function createSfx(): Sfx {
   let loopGain: GainNode | null = null;
 
   function load(url: string, set: (b: AudioBuffer) => void): void {
-    fetch(url)
+    fetch(asset(url))
       .then((r) => r.arrayBuffer())
       .then((b) => ctx!.decodeAudioData(b))
       .then(set)
