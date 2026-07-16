@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>own-game</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0f1a;
+      }
+      #app {
+        width: 100vw;
+        height: 100vh;
+      }
+      canvas {
+        display: block;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        color: #cdd6f4;
+        font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        pointer-events: none;
+        user-select: none;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      }
+      #count {
+        font-size: 16px;
+        font-weight: 700;
+        color: #ffd9ec;
+      }
+
+      /* ---- Weapon switcher (top center) -------------------------------- */
+      #weapons {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5; /* below the menu overlay (z-index 10) so you can't switch pre-start */
+        display: flex;
+        gap: 6px;
+        padding: 5px;
+        border-radius: 999px;
+        background: rgba(24, 16, 38, 0.42);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(6px);
+        user-select: none;
+      }
+      #weapons button {
+        font: 600 14px/1 "Segoe UI", system-ui, sans-serif;
+        color: #e9d8f4;
+        cursor: pointer;
+        padding: 9px 16px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        background: transparent;
+        transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+      }
+      #weapons button:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      #weapons button.active.meteor {
+        color: #2a160a;
+        background: linear-gradient(90deg, #ffd9a0, #ff9a4a);
+        box-shadow: 0 0 18px rgba(255, 150, 70, 0.65);
+      }
+      #weapons button.active.water {
+        color: #04212e;
+        background: linear-gradient(90deg, #b6f0ff, #49c8ff);
+        box-shadow: 0 0 18px rgba(80, 200, 255, 0.7);
+      }
+      #weapons .key {
+        opacity: 0.55;
+        font-size: 11px;
+        margin-left: 6px;
+      }
+
+      /* ---- Overlays (menu + victory) ------------------------------------ */
+      .overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      .overlay.hidden {
+        display: none;
+      }
+      #menu {
+        background: radial-gradient(
+          120% 120% at 50% 30%,
+          rgba(255, 221, 240, 0.22),
+          rgba(90, 60, 130, 0.5)
+        );
+        backdrop-filter: blur(4px);
+      }
+      /* Victory backdrop lets clicks pass through to the canvas so you can keep
+         flinging meteors over the parade; only the card is interactive. */
+      .overlay--pass {
+        pointer-events: none;
+        background: radial-gradient(
+          90% 90% at 50% 0%,
+          rgba(255, 240, 200, 0.22),
+          transparent 70%
+        );
+      }
+      .overlay--pass .card {
+        pointer-events: auto;
+      }
+
+      .card {
+        text-align: center;
+        color: #fff;
+        padding: 40px 56px;
+        background: rgba(40, 24, 56, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 24px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(8px);
+      }
+      .card h1 {
+        margin: 0 0 8px;
+        font-size: 44px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        background: linear-gradient(90deg, #ff9ad1, #ffd166, #8fd3ff, #c6a8ff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        text-shadow: 0 2px 18px rgba(255, 180, 230, 0.3);
+      }
+      .card p {
+        margin: 0 0 26px;
+        font-size: 16px;
+        opacity: 0.88;
+      }
+      .card button {
+        font: 600 18px/1 "Segoe UI", system-ui, sans-serif;
+        color: #4a1d4a;
+        cursor: pointer;
+        padding: 14px 40px;
+        border: none;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ffd9ec, #ffc2e2);
+        box-shadow: 0 8px 24px rgba(255, 140, 200, 0.5);
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      .card button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 30px rgba(255, 140, 200, 0.65);
+      }
+      .card button:active {
+        transform: translateY(0);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">
+      <span id="count">🦄 × 14</span>
+      <br />
+      WASD/QE — fly (shift = fast) · drag — charge &amp; hurl · right-drag —
+      orbit · scroll — zoom · 1/2 — weapon · M — mute
+    </div>
+
+    <div id="weapons">
+      <button id="weapon-meteor" class="meteor active">
+        ☄️ Meteor<span class="key">1</span>
+      </button>
+      <button id="weapon-water" class="water">
+        ⚡ Water Ball<span class="key">2</span>
+      </button>
+    </div>
+
+    <div id="menu" class="overlay">
+      <div class="card">
+        <h1>🦄 Unicorn Meadow</h1>
+        <p>En euforisk eng — indtil du kalder meteoren ned.</p>
+        <button id="start-btn">Start</button>
+      </div>
+    </div>
+
+    <div id="victory" class="overlay overlay--pass hidden">
+      <div class="card">
+        <h1>🌈 Sejr!</h1>
+        <p>Alle unicorns er besejret.</p>
+        <button id="replay-btn">Spil igen</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
