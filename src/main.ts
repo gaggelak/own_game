@@ -8,7 +8,7 @@ import { buildTerrain, terrainHeight, carveCrater, waterTime } from "./terrain";
 import { populateFlora } from "./flora";
 import { createHerd } from "./unicorn";
 import { initPhysics } from "./physics";
-import { createMeteorSystem, type WeaponKind } from "./meteor";
+import { createMeteorSystem, type WeaponKind, type ImpactInfo } from "./meteor";
 import { createVfx } from "./vfx";
 import { createDebris } from "./debris";
 import { createGibs } from "./gibs";
@@ -17,6 +17,9 @@ import { createAudio } from "./audio";
 import { createSfx } from "./sfx";
 import { CameraShake } from "./shake";
 import { createAmbience } from "./ambience";
+import { createScore } from "./score";
+import { createHud } from "./hud";
+import { createGame } from "./game";
 
 // ---------------------------------------------------------------------------
 // Renderer
@@ -39,6 +42,9 @@ app.appendChild(renderer.domElement);
 // ---------------------------------------------------------------------------
 const audio = createAudio();
 const sfx = createSfx();
+// Score keeps the numbers + the chain; hud owns every pixel of run feedback.
+const score = createScore();
+const hud = createHud();
 audio.play("menu");
 // Start the menu theme on open. The native app enables WebView2 autoplay (see
 // additionalBrowserArgs in tauri.conf.json), so this eager unlock plays the music
@@ -53,22 +59,30 @@ window.addEventListener("pointerdown", unlockAudio, { capture: true, once: true 
 window.addEventListener("keydown", unlockAudio, { capture: true, once: true });
 
 const menuEl = document.getElementById("menu")!;
-const victoryEl = document.getElementById("victory")!;
-const countEl = document.getElementById("count")!;
 let started = false;
-let won = false;
 let inCombat = false;
 let lastAttack = -999;
 const COMBAT_TAIL = 12; // seconds of calm after the last attack before the meadow theme returns
 
-document.getElementById("start-btn")!.addEventListener("click", () => {
-  if (started) return;
+// Both modes hand the camera over and drop the menu; game.ts takes it from there.
+function leaveMenu(): void {
   started = true;
   menuEl.classList.add("hidden");
   controls.autoRotate = false; // hand the camera over to the player (WASD + orbit)
-  audio.play("meadow");
+}
+document.getElementById("play-btn")!.addEventListener("click", () => {
+  if (started) return;
+  leaveMenu();
+  game.startRun();
 });
-document.getElementById("replay-btn")!.addEventListener("click", () => location.reload());
+document.getElementById("zen-btn")!.addEventListener("click", () => {
+  if (started) return;
+  leaveMenu();
+  game.startZen();
+});
+// A finished run reloads: levels transition in place, but a fresh run wants a
+// pristine meadow (craters, decals and debris all accumulate deliberately).
+document.getElementById("endcard-replay")!.addEventListener("click", () => location.reload());
 window.addEventListener("keydown", (e) => {
   if (e.key === "m" || e.key === "M") sfx.setMuted(audio.toggleMute());
 });
@@ -267,18 +281,36 @@ const electro = createElectro(scene, cameraShake);
 // radial impulse, then gibs for any unicorns caught in the blast.
 // ---------------------------------------------------------------------------
 let simTime = 0;
+let realTime = 0;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 const _toppleQ = new THREE.Quaternion();
 const _zapTo = new THREE.Vector3(); // raised target for electrocution bolts
 const ELECTRO_POP_RADIUS = 9; // blast size when an electrified unicorn finally bursts
+// When one bursts it electrifies its neighbours, who burst in turn: the water
+// ball is the setup weapon (seed a cluster, watch it cascade), the meteor is the
+// payoff. Smaller than the pop's own blast so a cascade needs real clustering.
+const CHAIN_RADIUS = 7;
+const SCARE_FACTOR = 2.5; // panic reaches well beyond the kill radius
+
+// Hitstop: a big multi-kill freezes the simulation for a beat so the blast
+// lands like a punch. The camera + HUD keep running on real time through it —
+// the world holds its breath, the fanfare doesn't.
+const HITSTOP_KILLS = 4; // kills in one blast before the world flinches
+const HITSTOP_SCALE = 0.1;
+let hitstopLeft = 0;
+function triggerHitstop(kills: number): void {
+  hitstopLeft = Math.max(hitstopLeft, kills >= 6 ? 0.2 : 0.12);
+}
 
 // Knock nearby trees/rocks/bushes loose: hide the instanced copy and replace it
 // with a dynamic rigid body (cuboid collider, COM mid-height so it tips) built
 // from the same geometry. The radial impulse then sends them tumbling.
-function toppleNearbyProps(point: THREE.Vector3, radius: number): void {
+function toppleNearbyProps(point: THREE.Vector3, radius: number): number {
   // Scale the topple count with blast size so a big crater doesn't leave props
   // standing in the bowl (the prop cap in physics.ts still bounds live bodies).
-  for (const hit of flora.queryProps(point, radius * 0.9, Math.max(6, Math.ceil(radius)))) {
+  // queryProps skips instances already hidden, so scoring these can't double-count.
+  const hits = flora.queryProps(point, radius * 0.9, Math.max(6, Math.ceil(radius)));
+  for (const hit of hits) {
     flora.hideInstance(hit);
     const g = new THREE.Group();
     for (const im of hit.meshes) {
@@ -321,23 +353,23 @@ function toppleNearbyProps(point: THREE.Vector3, radius: number): void {
       onExpire: () => scene.remove(g),
     });
   }
+  return hits.length;
 }
 
-// Update the herd tally + fire the victory state once nothing is left (counts
-// both the roaming herd and unicorns still mid-electrocution). Called after a
-// meteor kill and after each electric explosion resolves.
+// Update the herd tally (counts both the roaming herd and unicorns still
+// mid-electrocution). Wiping the meadow isn't a win state any more: in a level
+// run game.ts owns the clear condition, and Zen just restocks.
 function refreshHerd(): void {
-  const remaining = herd.aliveCount();
-  countEl.textContent = `🦄 × ${remaining}`;
-  if (started && !won && remaining === 0) {
-    won = true;
-    inCombat = false;
-    audio.play("victory", 1.4);
-    victoryEl.classList.remove("hidden");
-  }
+  hud.setCount(herd.aliveCount());
 }
 
-function handleImpact(point: THREE.Vector3, _velocity: THREE.Vector3, radius: number, kind: WeaponKind): void {
+function handleImpact(
+  point: THREE.Vector3,
+  _velocity: THREE.Vector3,
+  radius: number,
+  kind: WeaponKind,
+  info: ImpactInfo,
+): void {
   if (kind === "waterball") {
     // Electric water ball: a splashy electric burst. Unicorns in range don't die
     // instantly — they're left STANDING + electrified (herd.electrocuteAt),
@@ -351,6 +383,19 @@ function handleImpact(point: THREE.Vector3, _velocity: THREE.Vector3, radius: nu
     for (const p of hits) electro.zap(point, _zapTo.set(p.x, p.y + 1.5, p.z));
     sfx.electro(radius, hits.length > 0);
     if (hits.length) sfx.scream(hits.length); // panicked horse screams as they're fried
+    // The kills land later — each pop scores itself. This only banks the setup.
+    if (game.canScoreBlast()) {
+      hud.applyEvents(
+        score.registerWaterball({
+          point,
+          kills: hits.length,
+          props: 0,
+          charge: info.charge,
+          launchPos: info.launchPos,
+        }),
+        sfx,
+      );
+    }
   } else {
     // Meteor: molten impact — crater + scorch, fireball, debris, toppled props,
     // a strong blast impulse, and a gory shatter for anything caught in it.
@@ -366,7 +411,7 @@ function handleImpact(point: THREE.Vector3, _velocity: THREE.Vector3, radius: nu
     flora.clearGrassAt(point, radius * 0.95);
     flora.clearDecoAt(point, radius * 0.95);
     debris.spawn(point, radius, simTime);
-    toppleNearbyProps(point, radius);
+    const toppled = toppleNearbyProps(point, radius);
     // One radial impulse kicks the debris + freshly toppled props outward.
     physics.applyRadialImpulse(point, radius, radius * 1.3);
     // Gib any unicorns caught in the blast (spawned after the impulse so their
@@ -379,14 +424,36 @@ function handleImpact(point: THREE.Vector3, _velocity: THREE.Vector3, radius: nu
     // Impact sound: a unicorn kill uses the reserved blood clip; bare ground uses
     // a generic boom. Fired here (after the kill check) so we know which to play.
     sfx.explosion(radius, killed.length > 0);
+    // Score the whole blast at once: the same-blast ladder pays exponentially,
+    // so this is where clustering the herd first actually cashes out. An orb
+    // still in the air when the clock ran out lands for show, but never pays.
+    if (game.canScoreBlast()) {
+      hud.applyEvents(
+        score.registerBlast({
+          point,
+          kills: killed.length,
+          props: toppled,
+          charge: info.charge,
+          launchPos: info.launchPos,
+        }),
+        sfx,
+      );
+      game.addTimeForKills(killed.length);
+    }
+    if (killed.length >= HITSTOP_KILLS) triggerHitstop(killed.length);
   }
+
+  // Whatever survived, scatter it: every impact is also a herding tool. Done
+  // after the kills so the dead don't bolt.
+  herd.scareAt(point, radius * SCARE_FACTOR);
 
   // Meteor kills drop the tally now; the water ball's doomed unicorns stay
   // counted until they actually explode (handled in the frame loop).
   refreshHerd();
 
-  // Any impact that didn't just win the game ignites "Shattered Hoof Frenzy".
-  if (started && !won) {
+  // Any impact ignites "Shattered Hoof Frenzy" — unless the run is already over,
+  // where an orb still falling would otherwise hijack the end-card parade.
+  if (started && game.state() !== "runOver") {
     lastAttack = simTime;
     inCombat = true;
     audio.play("frenzy", 0.6); // quick punch-in so it hits with the blast
@@ -434,7 +501,57 @@ const ambience = createAmbience(scene);
 // Unicorns (imported animated horse + gold horn)
 // ---------------------------------------------------------------------------
 const herd = await createHerd(scene, 14);
-countEl.textContent = `🦄 × ${herd.aliveCount()}`;
+hud.setCount(herd.aliveCount());
+
+// The run: PLAY wipes this backdrop herd and starts the level gauntlet; ZEN
+// adopts it as-is and just keeps the meadow stocked from here on.
+const game = createGame({ herd, hud, score, audio, sfx });
+hud.setMenuStats(score.lifetime());
+
+// Dev-only console handle: staging a blast at an exact point is the only way to
+// line up a specific multi-kill on cue — real aiming is far too fiddly to test
+// "does 4 kills say QUADRICORN". Stripped from production builds.
+if (import.meta.env.DEV) {
+  (window as unknown as { __dev: unknown }).__dev = {
+    /** Detonate at a world point exactly as a real impact would. */
+    blast(x: number, z: number, radius = 14, kind: WeaponKind = "meteor", charge = 1, fromX = x, fromZ = z) {
+      handleImpact(
+        new THREE.Vector3(x, terrainHeight(x, z), z),
+        new THREE.Vector3(),
+        radius,
+        kind,
+        { charge, launchPos: new THREE.Vector3(fromX, terrainHeight(fromX, fromZ), fromZ) },
+      );
+    },
+    /** Where the herd currently is, so a test can aim at a real cluster. */
+    positions() {
+      const out: { x: number; z: number }[] = [];
+      herd.forEachRoaming((x, _y, z) => out.push({ x, z }));
+      return out;
+    },
+    /** The tightest cluster of `n` unicorns + the radius that would catch them. */
+    cluster(n: number) {
+      const p: { x: number; z: number }[] = [];
+      herd.forEachRoaming((x, _y, z) => p.push({ x, z }));
+      let best: { x: number; z: number; radius: number; count: number } | null = null;
+      for (const c of p) {
+        const near = p
+          .map((q) => ({ q, d: Math.hypot(q.x - c.x, q.z - c.z) }))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, n);
+        if (near.length < n) continue;
+        const spread = near[near.length - 1].d;
+        if (!best || spread < best.radius) {
+          best = { x: c.x, z: c.z, radius: spread + 1, count: n };
+        }
+      }
+      return best;
+    },
+    score,
+    herd,
+    game,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Post-processing: bloom so the explosion, embers, horn and rainbow glow.
@@ -484,13 +601,26 @@ function frame(): void {
   // would leap forward on return and instantly expire every airborne meteor,
   // debris chunk and gib (and drop combat music). Game time can't outrun 0.1s
   // per frame, so returning to the tab resumes cleanly.
-  const dt = Math.min(clock.getDelta(), 0.1);
+  const dtReal = Math.min(clock.getDelta(), 0.1);
+  realTime += dtReal;
+  // Hitstop burns down on REAL time, so a freeze can never wedge the game.
+  hitstopLeft = Math.max(0, hitstopLeft - dtReal);
+  const dt = dtReal * (hitstopLeft > 0 ? HITSTOP_SCALE : 1);
   simTime += dt;
   const t = simTime;
 
+  // The chain window runs on sim time, so a hitstop freeze never eats your
+  // combo. Run it first: everything scored later this frame — impacts inside
+  // meteors.update, pops inside herd.update — stamps the current clock.
+  hud.applyEvents(score.update(t), sfx);
+
+  // The clock, the waves, the level transitions. On sim time, so the freeze the
+  // player sees matches the countdown they're racing (PHOTO FINISH stays honest).
+  game.update(dt);
+
   // Combat cools off: after a calm stretch with no new attacks, drift the
   // frenzy theme back down to the peaceful meadow ambience.
-  if (inCombat && !won && t - lastAttack > COMBAT_TAIL) {
+  if (inCombat && t - lastAttack > COMBAT_TAIL) {
     inCombat = false;
     audio.play("meadow", 2.5);
   }
@@ -509,10 +639,23 @@ function frame(): void {
   const exploded = herd.update(dt, t);
   if (exploded.length) {
     const parts = herd.getHorsePartsForGibs();
+    let chained = 0;
     for (const k of exploded) {
       electro.spawnBurst(k.position, ELECTRO_POP_RADIUS);
       gibs.spawn(k, parts, k.position, ELECTRO_POP_RADIUS, t, "electro");
+      // A doomed unicorn still pays into the interstitial it earned — but not
+      // once the run is over.
+      if (game.canScorePop()) hud.applyEvents(score.registerPop(k.position, k.chainDepth), sfx);
+      // The burst electrifies whoever was standing too close — they convulse,
+      // then burst themselves. Terminates on its own: each unicorn can only be
+      // electrocuted once (electrocuteAt splices it out of the roaming herd).
+      const next = herd.electrocuteAt(k.position, CHAIN_RADIUS, k.chainDepth + 1);
+      for (const p of next) electro.zap(k.position, _zapTo.set(p.x, p.y + 1.5, p.z));
+      chained += next.length;
+      // The pop is a blast in its own right — scatter the survivors around it.
+      herd.scareAt(k.position, ELECTRO_POP_RADIUS * SCARE_FACTOR);
     }
+    if (chained) sfx.scream(chained);
     sfx.electro(ELECTRO_POP_RADIUS, true);
     refreshHerd();
   }
@@ -528,16 +671,26 @@ function frame(): void {
   electro.update(dt, t);
   gibs.update(dt);
 
-  updateCameraMovement(dt);
+  // Everything below runs on REAL time: the camera must stay 1:1 with the mouse
+  // even while the sim is frozen mid-hitstop.
+  updateCameraMovement(dtReal);
   controls.update();
   // Hard floor every frame: orbit + scroll-zoom can drive the camera below the
   // terrain even when WASD isn't touching it, so clamp after controls.update().
   clampCameraAboveGround();
   // Slide the shadow frustum to follow wherever we're looking.
   updateShadow();
+
+  // Score readout + the chain meter burning down, then the world-anchored pops.
+  const chain = score.chainState();
+  hud.setChain(chain.mult, chain.remaining01);
+  hud.setScore(score.current().score);
+  hud.update(dtReal, camera);
+
   // Apply camera shake as a transient offset around the render only (meteor
-  // blasts + electric bursts feed one shared trauma pool).
-  cameraShake.update(dt, t);
+  // blasts + electric bursts feed one shared trauma pool). On real time too —
+  // a shake frozen into a static skew would kill the whole point of the freeze.
+  cameraShake.update(dtReal, realTime);
   cameraShake.getOffset(shakeOffset);
   camera.position.add(shakeOffset);
   composer.render();

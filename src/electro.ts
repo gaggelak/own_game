@@ -15,7 +15,7 @@ import type { CameraShake } from "./shake";
 const FLASH_POOL = 4;
 const RING_POOL = 4;
 const PART_CAP = 1200; // shared electric sparks + water droplets
-const BOLT_SLOTS = 96; // ring buffer of jagged bolts (impact jolts + crawling crackle + zaps)
+const BOLT_SLOTS = 160; // a domino cascade can have 20+ unicorns crackling at once // ring buffer of jagged bolts (impact jolts + crawling crackle + zaps)
 const BOLT_SEG = 7; // segments per bolt
 
 export interface Electro {

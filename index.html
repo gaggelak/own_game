@@ -160,6 +160,297 @@
       .card button:active {
         transform: translateY(0);
       }
+      .btn-row {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+      }
+      /* Zen sits beside Play as the quieter option, not a lesser one. */
+      .card button.secondary {
+        color: #e6f4ff;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        box-shadow: none;
+      }
+      .card button.secondary:hover {
+        background: rgba(255, 255, 255, 0.2);
+        box-shadow: 0 10px 26px rgba(120, 200, 255, 0.35);
+      }
+      #menu-stats {
+        margin-top: 24px;
+        font: 600 12px/1.7 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #e9d8f4;
+        opacity: 0.7;
+        letter-spacing: 0.4px;
+      }
+      #menu-stats .title {
+        color: #ffd166;
+        opacity: 0.95;
+      }
+
+      /* ---- End card ------------------------------------------------------ */
+      #endcard-sub {
+        margin-bottom: 22px;
+      }
+      #endcard-stats {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 7px 32px;
+        margin-bottom: 22px;
+        font: 600 13px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        text-align: left;
+      }
+      #endcard-stats .k {
+        opacity: 0.6;
+        letter-spacing: 0.5px;
+      }
+      #endcard-stats .v {
+        text-align: right;
+        color: #ffd9ec;
+        font-variant-numeric: tabular-nums;
+      }
+      /* The number that never goes down — the reason a bad run still counts. */
+      #endcard-life-row {
+        margin-bottom: 26px;
+        padding: 14px 0 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.16);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+        font: 600 10px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        letter-spacing: 1.4px;
+        opacity: 0.85;
+      }
+      #endcard-life {
+        margin-top: 4px;
+        font: 800 38px/1.1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0;
+        color: #fff2fb;
+        text-shadow: 0 2px 16px rgba(255, 120, 200, 0.6);
+      }
+      #endcard-title {
+        font-size: 11px;
+        letter-spacing: 1.4px;
+        color: #ffd166;
+        min-height: 14px;
+      }
+
+      /* ---- Score panel (top right) -------------------------------------- */
+      #score-panel {
+        position: fixed;
+        top: 12px;
+        right: 14px;
+        z-index: 4;
+        text-align: right;
+        pointer-events: none;
+        user-select: none;
+      }
+      #score-panel.hidden {
+        display: none;
+      }
+      #score {
+        font: 700 34px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #fff2fb;
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 2px 10px rgba(255, 120, 200, 0.55), 0 1px 3px rgba(0, 0, 0, 0.6);
+      }
+      #chain-row {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 7px;
+        transition: opacity 0.25s ease;
+      }
+      #chain-row.idle {
+        opacity: 0; /* no live chain — fade the meter out entirely */
+      }
+      #chain {
+        width: 140px;
+        height: 7px;
+        border-radius: 999px;
+        background: rgba(24, 16, 38, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        overflow: hidden;
+      }
+      /* Width is driven per-frame from JS (the burn-down), so no transition here. */
+      #chain-fill {
+        height: 100%;
+        width: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ffd166, #ff6b9d);
+        box-shadow: 0 0 10px rgba(255, 150, 200, 0.8);
+      }
+      #chain-mult {
+        font: 700 18px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #ffd166;
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 0 12px rgba(255, 200, 80, 0.7);
+      }
+
+      /* ---- Countdown timer (under the weapon pill) ---------------------- */
+      #timer {
+        position: fixed;
+        top: 62px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 4;
+        font: 700 30px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #eaf6ff;
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+        pointer-events: none;
+        user-select: none;
+      }
+      #timer.hidden {
+        display: none;
+      }
+      #timer.urgent {
+        color: #ff5c7a;
+        animation: timer-pulse 0.5s ease-in-out infinite;
+      }
+      @keyframes timer-pulse {
+        0%,
+        100% {
+          transform: translateX(-50%) scale(1);
+        }
+        50% {
+          transform: translateX(-50%) scale(1.18);
+        }
+      }
+
+      /* ---- Kill-name banner (center) ------------------------------------ */
+      #banner {
+        position: fixed;
+        top: 30%;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 6;
+        text-align: center;
+        white-space: nowrap;
+        pointer-events: none;
+        user-select: none;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      /* Gradient-text like .card h1; each tier swaps size + a hotter ramp. */
+      #banner-main {
+        font-weight: 800;
+        letter-spacing: 1px;
+        opacity: 0;
+        background-clip: text;
+        -webkit-background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 3px 14px rgba(0, 0, 0, 0.45));
+      }
+      #banner-main.show {
+        animation: banner-pop 1.1s ease-out forwards;
+      }
+      @keyframes banner-pop {
+        0% {
+          opacity: 0;
+          transform: scale(1.7);
+        }
+        12% {
+          opacity: 1;
+          transform: scale(0.94);
+        }
+        22% {
+          transform: scale(1);
+        }
+        70% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: scale(1.06);
+        }
+      }
+      #banner-main.t1 {
+        font-size: 30px;
+        background-image: linear-gradient(90deg, #ffe9f6, #ffc2e2);
+      }
+      #banner-main.t2 {
+        font-size: 38px;
+        background-image: linear-gradient(90deg, #fff0c2, #ffd166);
+      }
+      #banner-main.t3 {
+        font-size: 46px;
+        background-image: linear-gradient(90deg, #ffd9a0, #ff9a4a);
+      }
+      #banner-main.t4 {
+        font-size: 54px;
+        background-image: linear-gradient(90deg, #ffc46b, #ff6b3d);
+      }
+      #banner-main.t5 {
+        font-size: 62px;
+        background-image: linear-gradient(90deg, #ffb0d8, #ff4d6d, #ffd166);
+      }
+      #banner-main.t6 {
+        font-size: 70px;
+        background-image: linear-gradient(90deg, #ff9ad1, #ff2d55, #ffa500);
+      }
+      #banner-main.t7 {
+        font-size: 80px;
+        background-image: linear-gradient(90deg, #ffffff, #ff2d55, #ffd166, #8fd3ff);
+      }
+      #banner-sub {
+        margin-top: 8px;
+        font: 700 20px/1 "Segoe UI", system-ui, sans-serif;
+        color: #b6f0ff;
+        opacity: 0;
+        white-space: nowrap;
+        text-shadow: 0 0 14px rgba(80, 200, 255, 0.8), 0 2px 6px rgba(0, 0, 0, 0.5);
+      }
+      #banner-sub.show {
+        animation: sub-pop 1.2s ease-out forwards;
+      }
+      @keyframes sub-pop {
+        0% {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        10% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        75% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-6px);
+        }
+      }
+
+      /* ---- Floating score pops (world-anchored, driven from hud.ts) ------ */
+      #pops {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .pop {
+        position: absolute;
+        left: 0;
+        top: 0;
+        font: 700 20px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #fff2fb;
+        white-space: nowrap;
+        opacity: 0;
+        will-change: transform, opacity;
+        text-shadow: 0 0 10px rgba(255, 140, 210, 0.9), 0 2px 4px rgba(0, 0, 0, 0.6);
+      }
+      .pop.big {
+        font-size: 26px;
+        color: #ffd166;
+        text-shadow: 0 0 14px rgba(255, 190, 70, 0.95), 0 2px 4px rgba(0, 0, 0, 0.6);
+      }
+      .pop.huge {
+        font-size: 32px;
+        color: #ff9ad1;
+        text-shadow: 0 0 16px rgba(255, 90, 180, 0.95), 0 2px 4px rgba(0, 0, 0, 0.6);
+      }
     </style>
   </head>
   <body>
@@ -180,19 +471,46 @@
       </button>
     </div>
 
-    <div id="menu" class="overlay">
-      <div class="card">
-        <h1>🦄 Unicorn Meadow</h1>
-        <p>En euforisk eng — indtil du kalder meteoren ned.</p>
-        <button id="start-btn">Start</button>
+    <div id="score-panel" class="hidden">
+      <div id="score">0</div>
+      <div id="chain-row" class="idle">
+        <div id="chain"><div id="chain-fill"></div></div>
+        <span id="chain-mult">×1.0</span>
       </div>
     </div>
 
-    <div id="victory" class="overlay overlay--pass hidden">
+    <div id="timer" class="hidden">0:00</div>
+
+    <div id="banner">
+      <div id="banner-main"></div>
+      <div id="banner-sub"></div>
+    </div>
+
+    <div id="pops"></div>
+
+    <div id="menu" class="overlay">
       <div class="card">
-        <h1>🌈 Sejr!</h1>
-        <p>Alle unicorns er besejret.</p>
-        <button id="replay-btn">Spil igen</button>
+        <h1>🦄 Unicorn Meadow</h1>
+        <p>A euphoric meadow — until you call down the meteor.</p>
+        <div class="btn-row">
+          <button id="play-btn">Play</button>
+          <button id="zen-btn" class="secondary">Zen</button>
+        </div>
+        <div id="menu-stats"></div>
+      </div>
+    </div>
+
+    <div id="endcard" class="overlay hidden">
+      <div class="card">
+        <h1 id="endcard-rank">RANK C</h1>
+        <p id="endcard-sub"></p>
+        <div id="endcard-stats"></div>
+        <div id="endcard-life-row">
+          MEADOW BODY COUNT · ALL TIME
+          <div id="endcard-life">0</div>
+          <div id="endcard-title"></div>
+        </div>
+        <button id="endcard-replay">Play again</button>
       </div>
     </div>
 

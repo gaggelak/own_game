@@ -127,6 +127,42 @@ function randomLandPoint(out: THREE.Vector2): void {
   out.set(0, 0);
 }
 
+// New waves gallop in from the rainbow side: outside the ±60 roaming area, but
+// well inside the ±120 terrain (and clear of all three lakes).
+function entranceLandPoint(out: THREE.Vector2): void {
+  for (let i = 0; i < 40; i++) {
+    const x = (Math.random() - 0.5) * 120;
+    const z = -78 - Math.random() * 26;
+    if (terrainHeight(x, z) > WATER_LEVEL + 1.4) {
+      out.set(x, z);
+      return;
+    }
+  }
+  out.set(0, -90);
+}
+
+// ---------------------------------------------------------------------------
+// Panic. Any impact scatters the herd nearby, which is what turns aiming into
+// tactics: cheap uncharged shots shepherd them into a cluster, and the fully
+// charged meteor cashes the cluster in.
+// ---------------------------------------------------------------------------
+const FLEE_MIN = 3; // seconds of blind panic …
+const FLEE_VAR = 1; // … plus up to this much, so a scattered group re-calms raggedly
+const FLEE_SPEED_MULT = 2.2;
+const FLEE_SPEED_MIN = 9; // even a plodder bolts (its walk speed × 2.2 is still a stroll)
+const FLEE_SPEED_MAX = 16;
+const FLEE_DIST = 20; // how far ahead it aims when bolting …
+const FLEE_DIST_VAR = 8;
+const FLEE_BOUND = 70; // … while staying well inside the ±120 terrain
+// Straight away first, then progressively more sideways (±30° … ±120°). A
+// unicorn with its back to a lake or the map edge should bolt ALONG it, not
+// wheel around through the fire — only a fully boxed-in one gives up and picks
+// anywhere at all.
+const FLEE_ANGLES = [0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57, 2.09, -2.09];
+const GALLOP_FLEE_TIMESCALE = 1.35; // hooves keep up with the panicked ground speed
+
+type Gait = "walk" | "gallop";
+
 interface Unicorn {
   wrapper: THREE.Group;
   model: THREE.Object3D;
@@ -138,6 +174,61 @@ interface Unicorn {
   target: THREE.Vector2;
   id: number;
   flashMats: THREE.MeshStandardMaterial[]; // per-unicorn body materials, flashed while electrified
+  walkAction: THREE.AnimationAction;
+  gallopAction: THREE.AnimationAction;
+  gait: Gait; // what's playing now
+  restGait: Gait; // what it drifts back to once it calms down
+  baseSpeed: number; // its unpanicked roaming speed
+  fleeTimer: number; // > 0 = bolting
+  fleeFromX: number; // the blast it's running from, so it keeps running AWAY
+  fleeFromZ: number;
+}
+
+// Crossfade walk↔gallop. Both actions are always playing at weights 1/0, so
+// panic is a blend rather than a snap.
+function setGait(u: Unicorn, gait: Gait, fade: number): void {
+  if (u.gait === gait) return;
+  const from = u.gait === "gallop" ? u.gallopAction : u.walkAction;
+  const to = gait === "gallop" ? u.gallopAction : u.walkAction;
+  u.gait = gait;
+  if (from === to) return; // both clips fell back to the same one — nothing to blend
+  to.enabled = true;
+  to.setEffectiveWeight(1);
+  from.crossFadeTo(to, fade, false);
+}
+
+// Aim a bolting unicorn away from `dx,dz` (the vector from the blast to it),
+// deflecting around water and the map edge rather than drowning itself.
+function fleeTarget(u: Unicorn, dx: number, dz: number): void {
+  let ax = dx;
+  let az = dz;
+  const len = Math.hypot(ax, az);
+  if (len < 1e-3) {
+    const a = Math.random() * Math.PI * 2; // struck dead-centre: any way but here
+    ax = Math.cos(a);
+    az = Math.sin(a);
+  } else {
+    ax /= len;
+    az /= len;
+  }
+  const dist = FLEE_DIST + Math.random() * FLEE_DIST_VAR;
+  const px = u.wrapper.position.x;
+  const pz = u.wrapper.position.z;
+  for (const off of FLEE_ANGLES) {
+    const c = Math.cos(off);
+    const s = Math.sin(off);
+    const tx = px + (ax * c - az * s) * dist;
+    const tz = pz + (ax * s + az * c) * dist;
+    if (
+      Math.abs(tx) <= FLEE_BOUND &&
+      Math.abs(tz) <= FLEE_BOUND &&
+      terrainHeight(tx, tz) > WATER_LEVEL + 1.4
+    ) {
+      u.target.set(tx, tz);
+      return;
+    }
+  }
+  randomLandPoint(u.target); // boxed in — just go somewhere
 }
 
 // Pin the world-space horn onto the forehead, following the animated head bone
@@ -161,6 +252,7 @@ interface Dying {
   baseX: number;
   baseY: number;
   baseZ: number;
+  chainDepth: number; // 0 = struck by the player, N = Nth link of a domino cascade
 }
 
 // Snapshot of a unicorn at the moment it is killed, used to spawn gibs.
@@ -168,6 +260,7 @@ export interface KilledUnicorn {
   position: THREE.Vector3; // world ground position
   heading: number; // wrapper yaw
   matrixWorld: THREE.Matrix4; // model-root world matrix: world = matrixWorld * rootLocalVert
+  chainDepth: number; // how deep into a domino cascade this death was
 }
 
 // Rest-pose geometry for geometry-accurate gibs (cached once, shared).
@@ -185,11 +278,29 @@ export interface Herd {
   killAt(point: THREE.Vector3, radius: number): KilledUnicorn[];
   // Water ball: mark unicorns in range as standing-electrified (they explode a
   // few seconds later via update). Returns their positions for the zap bolts.
-  electrocuteAt(point: THREE.Vector3, radius: number): THREE.Vector3[];
+  // chainDepth tags cascade victims so the score can pay out DOMINO ×N.
+  electrocuteAt(point: THREE.Vector3, radius: number, chainDepth?: number): THREE.Vector3[];
+  // Scatter the roaming herd away from an impact — the herding half of the game.
+  scareAt(point: THREE.Vector3, radius: number): void;
   // Visit every currently-electrified unicorn (for per-frame crackle VFX).
   forEachElectrified(cb: (x: number, y: number, z: number, height: number) => void): void;
+  // Visit every roaming (still-alive, not-yet-doomed) unicorn.
+  forEachRoaming(cb: (x: number, y: number, z: number) => void): void;
   aliveCount(): number; // roaming + still-standing electrified
+  roamingCount(): number; // just the ones still on their feet — a level's win condition
+  // Add a wave, applying its difficulty knobs to the whole herd. `entrances`
+  // makes them gallop in from the meadow edge instead of appearing in place.
+  spawnWave(count: number, opts?: WaveOpts): void;
+  // Clear the meadow entirely (starting a fresh run).
+  reset(): void;
   getHorsePartsForGibs(): GibParts;
+}
+
+export interface WaveOpts {
+  speedMult?: number;
+  gallopFraction?: number; // 0..1 — how much of the wave gallops rather than walks
+  scareRadiusMult?: number;
+  entrances?: boolean;
 }
 
 export async function createHerd(scene: THREE.Scene, count: number): Promise<Herd> {
@@ -219,8 +330,11 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
   const unicorns: Unicorn[] = []; // roaming, alive
   const dying: Dying[] = []; // electrocuted, standing + convulsing until they pop
   let nextId = 0;
+  // Difficulty knobs: later levels field a faster, twitchier herd.
+  let speedMult = 1;
+  let scareRadiusMult = 1;
 
-  function spawnUnicorn(): void {
+  function spawnUnicorn(opts: { gallop?: boolean; entrance?: boolean } = {}): void {
     const model = cloneSkeleton(template);
     let mesh: THREE.SkinnedMesh | null = null;
     // Clone the body materials per unicorn so one can flash electric-blue while
@@ -264,32 +378,74 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
     scene.add(horn);
     const headBone = model.getObjectByName("Head") ?? inner;
 
-    const galloping = Math.random() < 0.5;
+    // Both gaits run at once (weights 1/0) so panic can crossfade into a gallop
+    // instead of snapping. Offset by the same phase fraction, so a unicorn that
+    // switches gait mid-stride doesn't visibly reset its legs.
+    const galloping = opts.gallop ?? Math.random() < 0.5;
     const mixer = new THREE.AnimationMixer(model);
-    const clip = (galloping ? gallop : walk) ?? gltf.animations[0];
-    const action = mixer.clipAction(clip);
-    action.time = Math.random() * clip.duration;
-    action.timeScale = galloping ? 1.1 : 1.0;
-    action.play();
+    const fallback = gltf.animations[0];
+    const walkClip = walk ?? fallback;
+    const gallopClip = gallop ?? fallback;
+    const walkAction = mixer.clipAction(walkClip);
+    const gallopAction = mixer.clipAction(gallopClip);
+    const phase = Math.random();
+    walkAction.time = phase * walkClip.duration;
+    gallopAction.time = phase * gallopClip.duration;
+    walkAction.play();
+    gallopAction.play();
+    if (walkAction !== gallopAction) {
+      // Distinct clips: blend between them.
+      walkAction.timeScale = 1.0;
+      gallopAction.timeScale = 1.1;
+      walkAction.setEffectiveWeight(galloping ? 0 : 1);
+      gallopAction.setEffectiveWeight(galloping ? 1 : 0);
+    } else {
+      // The rig only had one clip — keep it at full weight and just re-time it.
+      walkAction.timeScale = galloping ? 1.1 : 1.0;
+    }
 
     const start = new THREE.Vector2();
-    randomLandPoint(start);
+    if (opts.entrance) entranceLandPoint(start);
+    else randomLandPoint(start);
     wrapper.position.set(start.x, terrainHeight(start.x, start.y), start.y);
     const target = new THREE.Vector2();
-    randomLandPoint(target);
+    randomLandPoint(target); // always head INTO the meadow, wherever it started
 
-    unicorns.push({
+    const baseSpeed = galloping ? 6 + Math.random() * 3 : 1.8 + Math.random() * 1.2;
+    const u: Unicorn = {
       wrapper,
       model,
       mesh,
       mixer,
       headBone,
       horn,
-      speed: galloping ? 6 + Math.random() * 3 : 1.8 + Math.random() * 1.2,
+      speed: baseSpeed * speedMult,
       target,
       id: nextId++,
       flashMats,
-    });
+      walkAction,
+      gallopAction,
+      gait: galloping ? "gallop" : "walk",
+      restGait: galloping ? "gallop" : "walk",
+      baseSpeed,
+      fleeTimer: 0,
+      fleeFromX: 0,
+      fleeFromZ: 0,
+    };
+    unicorns.push(u);
+
+    // Running in from the edge reuses the panic machinery: it gallops on at flee
+    // speed, then settles into its natural gait once the timer burns off. (A
+    // walker plodding 90 units in at 2/sec would eat most of the level's clock.)
+    if (opts.entrance) {
+      u.fleeTimer = FLEE_MIN + Math.random() * FLEE_VAR;
+      u.fleeFromX = start.x;
+      u.fleeFromZ = start.y - 20; // "behind" it, so away = deeper into the meadow
+      u.speed =
+        Math.min(Math.max(baseSpeed * FLEE_SPEED_MULT, FLEE_SPEED_MIN), FLEE_SPEED_MAX) * speedMult;
+      setGait(u, "gallop", 0);
+      u.gallopAction.timeScale = GALLOP_FLEE_TIMESCALE;
+    }
   }
 
   for (let i = 0; i < count; i++) spawnUnicorn();
@@ -327,12 +483,28 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       // Roam the living herd.
       for (const u of unicorns) {
         u.mixer.update(dt);
+        // Panic burns off: drop back to the spawn gait and go back to grazing.
+        if (u.fleeTimer > 0) {
+          u.fleeTimer -= dt;
+          if (u.fleeTimer <= 0) {
+            u.speed = u.baseSpeed * speedMult;
+            u.gallopAction.timeScale = 1.1;
+            setGait(u, u.restGait, 0.4);
+            randomLandPoint(u.target);
+          }
+        }
         const g = u.wrapper;
         const dx = u.target.x - g.position.x;
         const dz = u.target.y - g.position.z;
         const dist = Math.hypot(dx, dz);
         if (dist < 3) {
-          randomLandPoint(u.target);
+          // Still spooked on arrival? Keep running AWAY from the blast rather
+          // than picking a random target that might lead back into it.
+          if (u.fleeTimer > 0) {
+            fleeTarget(u, g.position.x - u.fleeFromX, g.position.z - u.fleeFromZ);
+          } else {
+            randomLandPoint(u.target);
+          }
         } else {
           const inv = 1 / dist;
           const vx = dx * inv;
@@ -376,6 +548,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
             position: new THREE.Vector3(d.baseX, d.baseY, d.baseZ),
             heading: yaw,
             matrixWorld: u.model.matrixWorld.clone(),
+            chainDepth: d.chainDepth,
           });
           scene.remove(g, u.horn);
           dying.splice(i, 1);
@@ -396,6 +569,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
           position: u.wrapper.position.clone(),
           heading: u.wrapper.rotation.y,
           matrixWorld: u.model.matrixWorld.clone(),
+          chainDepth: 0, // a roaming unicorn was never part of a cascade
         });
         u.mixer.stopAllAction();
         scene.remove(u.wrapper, u.horn);
@@ -405,7 +579,8 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       // it stands invulnerable for its convulsion (up to ~3s) and the hit reads
       // as a miss. It gibs bloodily now instead of finishing its electric pop.
       for (let i = dying.length - 1; i >= 0; i--) {
-        const u = dying[i].unicorn;
+        const d = dying[i];
+        const u = d.unicorn;
         const dx = u.wrapper.position.x - point.x;
         const dz = u.wrapper.position.z - point.z;
         if (dx * dx + dz * dz > r2) continue;
@@ -414,6 +589,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
           position: u.wrapper.position.clone(),
           heading: u.wrapper.rotation.y,
           matrixWorld: u.model.matrixWorld.clone(),
+          chainDepth: d.chainDepth, // cut short mid-cascade — it still earned its link
         });
         u.mixer.stopAllAction();
         scene.remove(u.wrapper, u.horn);
@@ -421,7 +597,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       }
       return killed;
     },
-    electrocuteAt(point: THREE.Vector3, radius: number): THREE.Vector3[] {
+    electrocuteAt(point: THREE.Vector3, radius: number, chainDepth = 0): THREE.Vector3[] {
       const hits: THREE.Vector3[] = [];
       const r2 = radius * radius;
       for (let i = unicorns.length - 1; i >= 0; i--) {
@@ -438,11 +614,30 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
           baseX: bx,
           baseY: by,
           baseZ: bz,
+          chainDepth,
         });
         hits.push(new THREE.Vector3(bx, by, bz));
         unicorns.splice(i, 1);
       }
       return hits;
+    },
+    scareAt(point: THREE.Vector3, radius: number): void {
+      const r = radius * scareRadiusMult;
+      const r2 = r * r;
+      for (const u of unicorns) {
+        const dx = u.wrapper.position.x - point.x;
+        const dz = u.wrapper.position.z - point.z;
+        if (dx * dx + dz * dz > r2) continue;
+        u.fleeTimer = FLEE_MIN + Math.random() * FLEE_VAR;
+        u.fleeFromX = point.x;
+        u.fleeFromZ = point.z;
+        u.speed =
+          Math.min(Math.max(u.baseSpeed * FLEE_SPEED_MULT, FLEE_SPEED_MIN), FLEE_SPEED_MAX) *
+          speedMult;
+        fleeTarget(u, dx, dz);
+        setGait(u, "gallop", 0.25);
+        u.gallopAction.timeScale = GALLOP_FLEE_TIMESCALE;
+      }
     },
     forEachElectrified(cb: (x: number, y: number, z: number, height: number) => void): void {
       for (const d of dying) {
@@ -450,8 +645,40 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         cb(p.x, p.y, p.z, ELECTRIFIED_H);
       }
     },
+    forEachRoaming(cb: (x: number, y: number, z: number) => void): void {
+      for (const u of unicorns) {
+        const p = u.wrapper.position;
+        cb(p.x, p.y, p.z);
+      }
+    },
     aliveCount() {
       return unicorns.length + dying.length;
+    },
+    roamingCount() {
+      return unicorns.length;
+    },
+    spawnWave(count: number, opts: WaveOpts = {}): void {
+      speedMult = opts.speedMult ?? 1;
+      scareRadiusMult = opts.scareRadiusMult ?? 1;
+      const gallopFraction = opts.gallopFraction ?? 0.5;
+      // The knobs apply to the standing herd too, so a Zen top-up can't leave
+      // old unicorns running at a stale difficulty.
+      for (const u of unicorns) if (u.fleeTimer <= 0) u.speed = u.baseSpeed * speedMult;
+      for (let i = 0; i < count; i++) {
+        spawnUnicorn({ gallop: Math.random() < gallopFraction, entrance: opts.entrances });
+      }
+    },
+    reset(): void {
+      for (const u of unicorns) {
+        u.mixer.stopAllAction();
+        scene.remove(u.wrapper, u.horn);
+      }
+      for (const d of dying) {
+        d.unicorn.mixer.stopAllAction();
+        scene.remove(d.unicorn.wrapper, d.unicorn.horn);
+      }
+      unicorns.length = 0;
+      dying.length = 0;
     },
     getHorsePartsForGibs,
   };

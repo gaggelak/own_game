@@ -42,7 +42,7 @@ const CAPS: Record<PhysicsKind, number> = {
   meteor: 9,
   debris: 60,
   prop: 16,
-  gib: 64, // 8 regions × up to 8 unicorns caught in one big blast
+  gib: 96, // a max-charge meteor into a late-level wave can shatter 10+ at once // 8 regions × up to 8 unicorns caught in one big blast
 };
 
 const TIMESTEP = 1 / 60;

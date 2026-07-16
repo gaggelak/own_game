@@ -53,6 +53,10 @@ const SCREAM_URLS = [
   "/sfx/horse-scream-3.ogg",
 ];
 
+// Major pentatonic (semitones): every note lands consonant, so an arpeggio of
+// any length reads as "triumph" without arranging one per kill tier.
+const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+
 export interface Sfx {
   /** Resume the AudioContext + kick off decoding. Call from a user gesture. */
   unlock(): void;
@@ -68,6 +72,16 @@ export interface Sfx {
   /** Drive the soft looping spark heard while unicorns stand electrified. Call
    *  every frame with how many are currently electrified (0 stops the loop). */
   electrifyLoop(count: number): void;
+  /** Rising arpeggio for a multi-kill; tier 1..7 adds notes + pitch. */
+  killFanfare(tier: number): void;
+  /** "Ka-ching" when a combo chain banks; pitch rises mildly with the mult. */
+  chainBank(mult: number): void;
+  /** Major fanfare when a level is wiped out. */
+  levelClear(): void;
+  /** One blip per second over the last few seconds of a level. */
+  countdownTick(): void;
+  /** Descending sting when the clock runs out. */
+  timeUp(): void;
   setMuted(muted: boolean): void;
 }
 
@@ -168,6 +182,33 @@ export function createSfx(): Sfx {
     g.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
     src.connect(lp); lp.connect(g); g.connect(master);
     src.start(now); src.stop(now + 0.32);
+  }
+
+  // The stingers below are pure synthesis (no assets): the score layer needs a
+  // sound per kill tier, and authoring 7 fanfares as files would be silly when
+  // an arpeggio is a for-loop. They all route through `master`, so M still mutes.
+  // Returns the live context + master, or null before audio has been unlocked.
+  function stingerCtx(): { c: AudioContext; m: GainNode } | null {
+    const c = ensureCtx();
+    if (c.state === "suspended") c.resume().catch(() => { /* ignore */ });
+    return master ? { c, m: master } : null;
+  }
+
+  // One plucked note: a triangle body with a quiet square on top for bite.
+  function pluck(c: AudioContext, m: GainNode, freq: number, at: number, vol: number, dur: number): void {
+    for (const [type, mix] of [["triangle", 1], ["square", 0.25]] as const) {
+      const o = c.createOscillator();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, at);
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(vol * mix, at + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      o.connect(g);
+      g.connect(m);
+      o.start(at);
+      o.stop(at + dur + 0.02);
+    }
   }
 
   return {
@@ -284,6 +325,141 @@ export function createSfx(): Sfx {
         loopGain?.disconnect();
         loopSrc = null;
         loopGain = null;
+      }
+    },
+    killFanfare(tier: number) {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      const t = Math.min(Math.max(Math.round(tier), 1), 7);
+      const notes = 2 + t; // DOUBLE KILL = 3 notes … EXTINCTION EVENT = 9
+      const root = 523.25 * Math.pow(2, ((t - 1) * 2) / 12); // +2 semitones per tier
+      const vol = 0.1 + t * 0.022;
+      for (let i = 0; i < notes; i++) {
+        const at = now + i * 0.055;
+        pluck(c, m, root * Math.pow(2, PENTA[Math.min(i, PENTA.length - 1)] / 12), at, vol, 0.16);
+      }
+      // The big tiers get a rising noise swoosh under the run.
+      if (t >= 4 && noiseBuf) {
+        const src = c.createBufferSource();
+        src.buffer = noiseBuf;
+        const bp = c.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.Q.value = 1.6;
+        bp.frequency.setValueAtTime(500, now);
+        bp.frequency.exponentialRampToValueAtTime(6000, now + notes * 0.055);
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.05 + t * 0.012, now + notes * 0.05);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + notes * 0.055 + 0.25);
+        src.connect(bp);
+        bp.connect(g);
+        g.connect(m);
+        src.start(now);
+        src.stop(now + notes * 0.055 + 0.3);
+      }
+    },
+    chainBank(mult: number) {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      const k = Math.min(Math.max((mult - 1) / 6, 0), 1);
+      const base = 1318.5 * (1 + k * 0.25); // fatter chain → brighter register
+      // "ka-" then "-ching": a short dyad, then a ringing one an octave up.
+      pluck(c, m, base, now, 0.16, 0.09);
+      pluck(c, m, base * 1.5, now, 0.16, 0.09);
+      pluck(c, m, base * 2, now + 0.085, 0.2, 0.5);
+      pluck(c, m, base * 3, now + 0.085, 0.14, 0.5);
+      if (noiseBuf) {
+        // The mechanical clack of the drawer.
+        const src = c.createBufferSource();
+        src.buffer = noiseBuf;
+        const hp = c.createBiquadFilter();
+        hp.type = "highpass";
+        hp.frequency.value = 5000;
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.12, now + 0.003);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+        src.connect(hp);
+        hp.connect(g);
+        g.connect(m);
+        src.start(now);
+        src.stop(now + 0.06);
+      }
+    },
+    levelClear() {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      // Major arpeggio, last note held: unmistakably "you did it".
+      const semis = [0, 4, 7, 12, 16];
+      semis.forEach((semi, i) => {
+        const at = now + i * 0.1;
+        const last = i === semis.length - 1;
+        pluck(c, m, 523.25 * Math.pow(2, semi / 12), at, 0.17, last ? 0.8 : 0.22);
+      });
+    },
+    countdownTick() {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      const o = c.createOscillator();
+      o.type = "square";
+      o.frequency.setValueAtTime(1000, now);
+      const g = c.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.12, now + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+      o.connect(g);
+      g.connect(m);
+      o.start(now);
+      o.stop(now + 0.1);
+    },
+    timeUp() {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      // Two detuned saws diving two octaves — the sound of the fun ending.
+      for (let i = 0; i < 2; i++) {
+        const o = c.createOscillator();
+        o.type = "sawtooth";
+        o.frequency.setValueAtTime(440 + i * 6, now);
+        o.frequency.exponentialRampToValueAtTime(110, now + 0.6);
+        const lp = c.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.setValueAtTime(2400, now);
+        lp.frequency.exponentialRampToValueAtTime(500, now + 0.6);
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.16, now + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.75);
+        o.connect(lp);
+        lp.connect(g);
+        g.connect(m);
+        o.start(now);
+        o.stop(now + 0.8);
+      }
+      if (noiseBuf) {
+        const src = c.createBufferSource();
+        src.buffer = noiseBuf;
+        const lp = c.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.value = 200;
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.3, now + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+        src.connect(lp);
+        lp.connect(g);
+        g.connect(m);
+        src.start(now);
+        src.stop(now + 0.55);
       }
     },
     setMuted(m: boolean) {

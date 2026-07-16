@@ -72,13 +72,28 @@ export interface MeteorSystem {
   dispose(): void;
 }
 
+// What the throw itself was like, for whoever scores the impact: how long it
+// was charged, and where it was hurled from (so a cross-meadow shot can pay
+// out as one). Cloned at launch — the orb's own position is overwritten in
+// flight, and detonateOldest() fires long after launch()'s scope is gone.
+export interface ImpactInfo {
+  charge: number; // 0..1
+  launchPos: THREE.Vector3;
+}
+
 export interface MeteorOpts {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   physics: Physics;
   domElement: HTMLElement;
-  onImpact: (point: THREE.Vector3, velocity: THREE.Vector3, radius: number, kind: WeaponKind) => void;
+  onImpact: (
+    point: THREE.Vector3,
+    velocity: THREE.Vector3,
+    radius: number,
+    kind: WeaponKind,
+    info: ImpactInfo,
+  ) => void;
 }
 
 // Meteor sprites share the base gradient but sit at midStop 0.4 with a warm
@@ -252,6 +267,7 @@ interface Flying {
   orb: Orb;
   handle: PhysicsHandle;
   charge: number;
+  launchPos: THREE.Vector3; // cloned at launch; the orb's own position moves
 }
 
 const _ndc = new THREE.Vector2();
@@ -749,7 +765,10 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       RADIUS_MAX,
     );
     _hit.set(p.x, terrainHeight(p.x, p.z), p.z);
-    onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind);
+    onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
+      charge: rec.charge,
+      launchPos: rec.launchPos,
+    });
     physics.remove(rec.handle); // onExpire splices flying + parks the orb
   }
 
@@ -826,6 +845,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const rec: Flying = {
       orb,
       charge,
+      launchPos: spawn.clone(), // `spawn` is the orb's live position — snapshot it
       handle: {
         body,
         object: orb.group,
@@ -973,7 +993,10 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
             RADIUS_MAX,
           );
           _hit.set(p.x, groundY, p.z);
-          onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind);
+          onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
+            charge: rec.charge,
+            launchPos: rec.launchPos,
+          });
           physics.remove(rec.handle); // onExpire parks the orb + splices `flying`
         }
       }
