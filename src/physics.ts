@@ -39,7 +39,7 @@ export interface Physics {
 }
 
 const CAPS: Record<PhysicsKind, number> = {
-  meteor: 9,
+  meteor: 13, // must stay ≥ meteor.ts POOL_SIZE — detonateOldest owns eviction, not this cap
   debris: 60,
   prop: 16,
   gib: 96, // a max-charge meteor into a late-level wave can shatter 10+ at once // 8 regions × up to 8 unicorns caught in one big blast

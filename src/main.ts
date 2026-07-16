@@ -100,14 +100,21 @@ const camera = new THREE.PerspectiveCamera(
   0.5,
   2000,
 );
-camera.position.set(30, 17, 44);
+// Start pose sits at the centre of the polar band below, so the first
+// controls.update() doesn't visibly snap the view.
+camera.position.set(25, 34, 37);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false; // instant 1:1 response — no coast/glide after release
 controls.target.set(0, 3, 0);
 controls.minDistance = 14;
 controls.maxDistance = 130;
-controls.maxPolarAngle = Math.PI * 0.495;
+// Pitch is locked to a narrow band: the throw's trajectory preview only reads
+// reliably from a consistent viewing angle, so no ground-level or overhead shots.
+const POLAR_MIN_DEG = 50; // TUNABLE: how far toward overhead the camera may pitch
+const POLAR_MAX_DEG = 60; // TUNABLE: how close to the ground
+controls.minPolarAngle = THREE.MathUtils.degToRad(POLAR_MIN_DEG);
+controls.maxPolarAngle = THREE.MathUtils.degToRad(POLAR_MAX_DEG);
 controls.autoRotate = true;
 controls.autoRotateSpeed = 0.3;
 // Left button is meteor-only: disable left-orbit entirely so a quick tap — or a
@@ -550,6 +557,12 @@ if (import.meta.env.DEV) {
     score,
     herd,
     game,
+    // The Browser pane runs hidden (rAF paused), so tests drive the sim by hand:
+    // step physics + meteors manually, read the camera/controls band directly.
+    meteors,
+    physics,
+    controls,
+    camera,
   };
 }
 
@@ -666,7 +679,9 @@ function frame(): void {
   sfx.electrifyLoop(electrified);
 
   physics.step(dt, t);
-  meteors.update(dt, t);
+  // Sim dt flies the orbs; real dt drives the charge gesture (meter + arc must
+  // stay smooth through a hitstop freeze).
+  meteors.update(dt, t, dtReal);
   vfx.update(dt, t);
   electro.update(dt, t);
   gibs.update(dt);

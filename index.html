@@ -318,6 +318,40 @@
         }
       }
 
+      /* ---- Force meter (bottom center, shown while charging) ------------- */
+      /* Width is driven per-frame from meteor.ts (the charge), so no transition. */
+      #force-meter {
+        position: fixed;
+        bottom: 84px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 4;
+        width: 200px;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(24, 16, 38, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        overflow: hidden;
+        opacity: 0;
+        transition: opacity 0.12s ease;
+        pointer-events: none;
+        user-select: none;
+      }
+      #force-meter.show {
+        opacity: 1;
+      }
+      #force-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ffd9a0, #ff9a4a);
+        box-shadow: 0 0 10px rgba(255, 150, 70, 0.8);
+      }
+      #force-meter.water #force-fill {
+        background: linear-gradient(90deg, #b6f0ff, #49c8ff);
+        box-shadow: 0 0 10px rgba(80, 200, 255, 0.8);
+      }
+
       /* ---- Kill-name banner (center) ------------------------------------ */
       #banner {
         position: fixed;
@@ -458,8 +492,8 @@
     <div id="hud">
       <span id="count">🦄 × 14</span>
       <br />
-      WASD/QE — fly (shift = fast) · drag — charge &amp; hurl · right-drag —
-      orbit · scroll — zoom · 1/2 — weapon · M — mute
+      WASD/QE — fly (shift = fast) · hold — charge · aim — mouse · release —
+      fire · right-drag — orbit · scroll — zoom · 1/2 — weapon · M — mute
     </div>
 
     <div id="weapons">
@@ -480,6 +514,8 @@
     </div>
 
     <div id="timer" class="hidden">0:00</div>
+
+    <div id="force-meter"><div id="force-fill"></div></div>
 
     <div id="banner">
       <div id="banner-main"></div>

@@ -7,36 +7,53 @@ import { terrainHeight } from "./terrain";
 import { softDot } from "./textures";
 
 // ---------------------------------------------------------------------------
-// God-hand lava meteor. Hold the left button to CONJURE a molten orb in front
-// of the camera; while held it GATHERS into a ball — loose rocks orbit, spiral
-// inward and melt into a growing molten sphere, embers swirl off it, and it
-// swells + glows hotter the longer you charge. Release to HURL it: a true ballistic arc
-// (solved analytically against gravity) flings it out over the meadow toward
-// where you aimed — a hard flick leads the aim farther and flattens the arc, so
-// it flies and falls like a thrown rock instead of dropping straight down. It
+// God-hand lava meteor. Hold the left button to CONJURE a molten orb at a fixed
+// slot in front of the camera; while held it GATHERS into a ball — loose rocks
+// orbit, spiral inward and melt into a growing molten sphere — and a force
+// meter fills. The cursor AIMS: a dotted ballistic arc + landing ring preview
+// exactly where the shot will land and how big the blast will be. Release to
+// HURL it along the shown arc — deterministic, so the same aim + the same force
+// always lands the same spot, and a quick tap fires a short shot instantly. It
 // detonates on the analytic ground test (the collider ignores the terrain so it
-// never bounces). Bigger charge → bigger blast.
+// never bounces). Bigger force → farther AND bigger blast.
 // ---------------------------------------------------------------------------
 
 const G = 22; // matches world gravity magnitude (physics.ts)
 const DEG = Math.PI / 180;
-const HOLD_DIST = 15; // how far in front of the camera the orb is held while charging
 const LIFT_MIN = 6; // keep it at least this far above the ground beneath it
 const ORB_R = 1.2; // physics collider radius
-const POOL_SIZE = 9; // up to MAX_FLYING airborne + 1 charging
-const MAX_FLYING = 8; // beyond this, the oldest detonates instead of vanishing
+const POOL_SIZE = 13; // up to MAX_FLYING airborne + 1 charging
+const MAX_FLYING = 12; // beyond this, the oldest detonates instead of vanishing
 const TRAIL_LEN = 28;
 
-const CHARGE_TIME = 0.9; // seconds of holding to reach full charge
+const CHARGE_TIME = 0.9; // seconds of holding to reach full force
 
-// Throw solve: the launch angle eases from a high lob to a flat hurl with flick power.
-const ANGLE_BASE = 42;
-const ANGLE_FLAT = 23;
-const ANGLE_STEEP = 62; // fallback for targets the base angle can't reach
-const MAX_THROW_SPEED = 96;
-const FLICK_FULL = 2600; // px/sec flick that counts as full power
-const LEAD_K = 0.16; // world units of aim lead per px of flick
-const LEAD_MAX = 60;
+// Throw solve: direction comes from the cursor's ground point, speed from the
+// force meter. The launch angle is FIXED so every throw flies the same shape —
+// aim and force are the only two knobs, which is what makes it learnable.
+// (If tuning ever wants force linear in DISTANCE instead of speed, the swap is
+// v = sqrt(lerp(MIN_V², MAX_V², force)).)
+const LAUNCH_ANGLE = 42; // deg
+const SIN_A = Math.sin(LAUNCH_ANGLE * DEG);
+const COS_A = Math.cos(LAUNCH_ANGLE * DEG);
+const MIN_FORCE = 0.15; // force floor: a tap still fires a useful short shot
+const MIN_V = 14; // launch speed at zero force
+const MAX_V = 56; // full force: flat range ≈ v²·sin(2·42°)/G ≈ 141 — the meadow's far side
+
+// The orb charges at a FIXED camera-relative slot (lower-centre of the screen),
+// so the launch origin is stable and reproducible while the cursor aims freely.
+const ANCHOR_NDC_Y = -0.45;
+const ANCHOR_DIST = 14; // world units along that ray from the camera
+
+// Trajectory preview. PREVIEW_STEP must equal the physics timestep (physics.ts)
+// — the march integrates exactly like Rapier so the drawn arc IS the flight.
+const PREVIEW_STEP = 1 / 60;
+const MAX_PREVIEW_STEPS = 240; // 4 s of flight; max real flight at MAX_V ≈ 3.7 s
+const ARC_DOT_SPACING = 2.0; // world units between arc dots
+const MAX_ARC_DOTS = 96;
+const ARC_FLOW_SPEED = 10; // u/s of dot-flow phase toward the landing point
+const RING_DOTS = 48;
+const RING_LIFT = 0.3; // ring dots hover this far above the terrain
 
 // Blast radius grows mostly with charge, a little with impact speed.
 const BASE_RADIUS = 7;
@@ -66,7 +83,8 @@ const CHUNK_URL = "/models/nature/rock_smallB.glb"; // the gathering rocks
 export type WeaponKind = "meteor" | "waterball";
 
 export interface MeteorSystem {
-  update(dt: number, time: number): void;
+  /** dt is sim time (freezes with hitstop); dtReal drives the charge gesture. */
+  update(dt: number, time: number, dtReal: number): void;
   setWeapon(kind: WeaponKind): void;
   getWeapon(): WeaponKind;
   dispose(): void;
@@ -274,37 +292,8 @@ const _ndc = new THREE.Vector2();
 const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _hit = new THREE.Vector3();
 const _aim = new THREE.Vector3();
-const _vel = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
-const _right = new THREE.Vector3();
-const _fwd = new THREE.Vector3();
 const _trailC = new THREE.Color(); // scratch; per-weapon trail colours live in WEAPONS
-
-// Solve a launch velocity (out) that carries `start` through `target` under
-// gravity G at the given launch angle. Returns false if unreachable there.
-function solveAngle(
-  start: THREE.Vector3,
-  target: THREE.Vector3,
-  angleDeg: number,
-  out: THREE.Vector3,
-): boolean {
-  const dx = target.x - start.x;
-  const dz = target.z - start.z;
-  const R = Math.hypot(dx, dz);
-  if (R < 1e-3) return false;
-  const h = target.y - start.y;
-  const th = angleDeg * DEG;
-  const c = Math.cos(th);
-  const tn = Math.tan(th);
-  const denom = 2 * c * c * (R * tn - h);
-  if (denom <= 0) return false;
-  let v = Math.sqrt((G * R * R) / denom);
-  if (!isFinite(v) || v <= 0) return false;
-  v = Math.min(v, MAX_THROW_SPEED);
-  const inv = 1 / R;
-  out.set(dx * inv * v * c, v * Math.sin(th), dz * inv * v * c);
-  return true;
-}
 
 export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem> {
   const { scene, camera, controls, physics, domElement, onImpact } = opts;
@@ -361,6 +350,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     trailHot: THREE.Color;
     trailCold: THREE.Color;
     hasArcs: boolean;
+    previewColor: number; // tint for the trajectory arc + landing ring
   }
   const WEAPONS: Record<WeaponKind, WeaponVisual> = {
     meteor: {
@@ -385,6 +375,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       trailHot: new THREE.Color(0xffd9a0),
       trailCold: new THREE.Color(0x661500),
       hasArcs: false,
+      previewColor: 0xffa050,
     },
     waterball: {
       makeCore(glow) {
@@ -410,6 +401,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       trailHot: new THREE.Color(0xdff6ff),
       trailCold: new THREE.Color(0x0a3a66),
       hasArcs: true,
+      previewColor: 0x55d8ff,
     },
   };
 
@@ -639,23 +631,165 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
   const flying: Flying[] = [];
 
+  // ---- trajectory preview: dotted arc + landing ring -------------------------
+  // One neutral-white soft dot; the per-weapon tint rides material.color.
+  const previewDot = makeSoftDot("rgba(255,255,255,1)", "rgba(255,255,255,0.85)", "rgba(255,255,255,0)");
+  function buildPreviewPoints(cap: number, size: number): THREE.Points {
+    const geo = new THREE.BufferGeometry();
+    const attr = new THREE.BufferAttribute(new Float32Array(cap * 3), 3);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("position", attr);
+    const pts = new THREE.Points(
+      geo,
+      new THREE.PointsMaterial({
+        size,
+        map: previewDot,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true,
+        fog: false,
+      }),
+    );
+    pts.frustumCulled = false;
+    pts.visible = false;
+    scene.add(pts);
+    return pts;
+  }
+  const previewArc = buildPreviewPoints(MAX_ARC_DOTS, 1.1);
+  const previewRing = buildPreviewPoints(RING_DOTS, 0.9);
+  const previewArcPos = (previewArc.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+  const previewRingPos = (previewRing.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+  const previewArcMat = previewArc.material as THREE.PointsMaterial;
+  const previewRingMat = previewRing.material as THREE.PointsMaterial;
+
+  // Force meter (bottom-centre bar in index.html). Owned here rather than by
+  // hud.ts: it's 60 Hz input-gesture state, not score presentation.
+  const forceMeter = document.getElementById("force-meter");
+  const forceFill = document.getElementById("force-fill");
+
   // ---- gesture state --------------------------------------------------------
   let charging: Orb | null = null;
   let holdTime = 0;
   let pointerId = -1;
-  let savedAutoRotate = controls.autoRotate;
-  let restoreTimer: number | undefined;
   let lastTime = 0;
-  const samples: { x: number; y: number; t: number }[] = [];
+  let realClock = 0; // real-time clock so the arc's dot-flow never hitstop-freezes
+  let lastCursorX = 0;
+  let lastCursorY = 0;
+  let throwValid = false; // computeThrow has run for the current gesture
 
-  // Held position: a fixed distance in front of the cursor, lifted above terrain.
-  function conjurePos(clientX: number, clientY: number, out: THREE.Vector3): void {
-    const rect = domElement.getBoundingClientRect();
-    _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-    raycaster.setFromCamera(_ndc, camera);
-    out.copy(raycaster.ray.origin).addScaledVector(raycaster.ray.direction, HOLD_DIST);
+  // The orb's held slot: a fixed camera-relative anchor, lifted above terrain.
+  // Re-evaluated every charging frame so WASD/zoom keeps the orb glued to it.
+  const _anchorNdc = new THREE.Vector2(0, ANCHOR_NDC_Y);
+  function anchorPos(out: THREE.Vector3): void {
+    raycaster.setFromCamera(_anchorNdc, camera);
+    out.copy(raycaster.ray.origin).addScaledVector(raycaster.ray.direction, ANCHOR_DIST);
     const gh = terrainHeight(out.x, out.z);
     if (out.y < gh + LIFT_MIN) out.y = gh + LIFT_MIN;
+  }
+
+  // The ONE deterministic throw solve, shared by preview and launch: azimuth
+  // from the anchor toward the ground point under the cursor, speed from the
+  // force meter, fixed launch angle. Writes `throwVel`. When the cursor gives
+  // no usable direction (sky, or dead over the orb) the last one holds.
+  const throwVel = new THREE.Vector3();
+  const lastDir = new THREE.Vector3();
+  let lastDirValid = false;
+  function computeThrow(force: number, cx: number, cy: number, anchor: THREE.Vector3): void {
+    if (!lastDirValid) {
+      // First aim ever: seed with the camera's forward azimuth.
+      const e = camera.matrixWorld.elements;
+      lastDir.set(-e[8], 0, -e[10]);
+      if (lastDir.lengthSq() < 1e-6) lastDir.set(0, 0, -1);
+      lastDir.normalize();
+      lastDirValid = true;
+    }
+    if (groundUnder(cx, cy, _aim)) {
+      _tmp.copy(_aim).sub(anchor);
+      _tmp.y = 0;
+      if (_tmp.lengthSq() > 1e-6) lastDir.copy(_tmp.normalize());
+    }
+    const v = MIN_V + (MAX_V - MIN_V) * force;
+    throwVel.set(lastDir.x * v * COS_A, v * SIN_A, lastDir.z * v * COS_A);
+  }
+
+  // March the throw under gravity exactly as Rapier will fly it: semi-implicit
+  // Euler at the fixed physics timestep (velocity BEFORE position), zero drag,
+  // terminated by the same ground test that detonates a real orb in update().
+  // Fills the arc buffer (a dot every ARC_DOT_SPACING, phased so the dots flow
+  // toward the target), and leaves landing point + impact speed in _land/_landV.
+  const _mp = new THREE.Vector3();
+  const _mv = new THREE.Vector3();
+  const _mprev = new THREE.Vector3();
+  const _land = new THREE.Vector3();
+  let _landV = 0;
+  function marchTrajectory(start: THREE.Vector3, vel: THREE.Vector3): number {
+    _mp.copy(start);
+    _mv.copy(vel);
+    let nDots = 0;
+    let traveled = 0;
+    let nextDot = ARC_DOT_SPACING - ((realClock * ARC_FLOW_SPEED) % ARC_DOT_SPACING);
+    let prevDiff = _mp.y - ORB_R - 0.2 - terrainHeight(_mp.x, _mp.z);
+    for (let i = 0; i < MAX_PREVIEW_STEPS; i++) {
+      _mprev.copy(_mp);
+      _mv.y -= G * PREVIEW_STEP;
+      _mp.addScaledVector(_mv, PREVIEW_STEP);
+      const stepLen = _mp.distanceTo(_mprev);
+      const diff = _mp.y - ORB_R - 0.2 - terrainHeight(_mp.x, _mp.z);
+      if (diff <= 0 && prevDiff > 0) {
+        const s = prevDiff / (prevDiff - diff);
+        _land.copy(_mprev).lerp(_mp, s);
+        _land.y = terrainHeight(_land.x, _land.z);
+        _landV = _mv.length();
+        return nDots;
+      }
+      prevDiff = diff;
+      traveled += stepLen;
+      while (traveled >= nextDot && nDots < MAX_ARC_DOTS) {
+        const back = (traveled - nextDot) / Math.max(stepLen, 1e-6);
+        previewArcPos[nDots * 3] = _mp.x + (_mprev.x - _mp.x) * back;
+        previewArcPos[nDots * 3 + 1] = _mp.y + (_mprev.y - _mp.y) * back;
+        previewArcPos[nDots * 3 + 2] = _mp.z + (_mprev.z - _mp.z) * back;
+        nDots++;
+        nextDot += ARC_DOT_SPACING;
+      }
+    }
+    // Step cap reached (shouldn't happen inside the meadow) — land it below.
+    _land.set(_mp.x, terrainHeight(_mp.x, _mp.z), _mp.z);
+    _landV = _mv.length();
+    return nDots;
+  }
+
+  // Re-solve + redraw the whole preview for the current cursor/force. Also runs
+  // once from onDown, so a same-frame tap always has a valid throwVel.
+  function updatePreview(): void {
+    if (!charging) return;
+    const force = THREE.MathUtils.clamp(holdTime / CHARGE_TIME, MIN_FORCE, 1);
+    computeThrow(force, lastCursorX, lastCursorY, charging.group.position);
+    throwValid = true;
+
+    const nDots = marchTrajectory(charging.group.position, throwVel);
+    previewArc.geometry.setDrawRange(0, nDots);
+    (previewArc.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+
+    // Landing ring, sized by the EXACT radius formula the detonation uses —
+    // the ring is a promise, not an estimate.
+    const radius = THREE.MathUtils.clamp(
+      BASE_RADIUS + force * CHARGE_RADIUS + _landV * RADIUS_PER_SPEED,
+      RADIUS_MIN,
+      RADIUS_MAX,
+    );
+    for (let i = 0; i < RING_DOTS; i++) {
+      const a = (i / RING_DOTS) * Math.PI * 2;
+      const x = _land.x + Math.cos(a) * radius;
+      const z = _land.z + Math.sin(a) * radius;
+      previewRingPos[i * 3] = x;
+      previewRingPos[i * 3 + 1] = terrainHeight(x, z) + RING_LIFT; // conform to slopes/craters
+      previewRingPos[i * 3 + 2] = z;
+    }
+    (previewRing.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+
+    if (forceFill) forceFill.style.width = `${(force * 100).toFixed(1)}%`;
   }
 
   // Ground point under a screen position: march the cursor ray against the
@@ -688,20 +822,15 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     return false;
   }
 
-  function disableOrbit(): void {
-    if (controls.enabled) savedAutoRotate = controls.autoRotate;
-    controls.enabled = false;
-    controls.autoRotate = false;
-    if (restoreTimer !== undefined) { clearTimeout(restoreTimer); restoreTimer = undefined; }
-  }
-
   function onDown(e: PointerEvent): void {
     // Left button only, and never while already charging. No throw cooldown: every
     // distinct press conjures + throws, so rapid taps reliably spam projectiles.
     if (e.button !== 0 || charging) return;
     const orb = acquire(currentWeapon);
     if (!orb) return;
-    disableOrbit(); // capture phase runs before OrbitControls' own handler
+    // LMB can never orbit (mouseButtons.LEFT = null in main.ts); just make sure
+    // the menu's idle auto-rotate is off the moment the first throw starts.
+    controls.autoRotate = false;
     e.preventDefault();
     e.stopPropagation();
     pointerId = e.pointerId;
@@ -709,10 +838,11 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
     charging = orb;
     holdTime = 0;
-    samples.length = 0;
-    samples.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+    throwValid = false;
+    lastCursorX = e.clientX;
+    lastCursorY = e.clientY;
 
-    conjurePos(e.clientX, e.clientY, _hit);
+    anchorPos(_hit);
     orb.group.position.copy(_hit);
     orb.group.scale.setScalar(0.6);
     orb.group.rotation.set(0, 0, 0);
@@ -723,30 +853,25 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (orb.arcs) orb.arcs.visible = true;
     orb.coreGlow.value = 1.0;
     orb.haloMat.opacity = 0.07;
+
+    // Preview on, tinted for this orb's weapon; meter shown; one preview pass
+    // right now so releasing this very frame still fires a solved throw.
+    previewArcMat.color.setHex(WEAPONS[orb.kind].previewColor);
+    previewRingMat.color.setHex(WEAPONS[orb.kind].previewColor);
+    previewArc.visible = true;
+    previewRing.visible = true;
+    if (forceMeter) {
+      forceMeter.classList.add("show");
+      forceMeter.classList.toggle("water", orb.kind === "waterball");
+    }
+    updatePreview();
   }
 
   function onMove(e: PointerEvent): void {
     if (!charging || e.pointerId !== pointerId) return;
-    conjurePos(e.clientX, e.clientY, _hit);
-    charging.group.position.copy(_hit);
-    samples.push({ x: e.clientX, y: e.clientY, t: performance.now() });
-    if (samples.length > 8) samples.shift();
-  }
-
-  // Flick over the last ~120ms: pixel speed + pixel delta (dx right+, dy down+).
-  function flick(): { speed: number; dx: number; dy: number } {
-    if (samples.length < 2) return { speed: 0, dx: 0, dy: 0 };
-    const newest = samples[samples.length - 1];
-    let old = samples[0];
-    for (let i = samples.length - 1; i >= 0; i--) {
-      old = samples[i];
-      if (newest.t - samples[i].t > 120) break;
-    }
-    const dtm = (newest.t - old.t) / 1000;
-    const dx = newest.x - old.x;
-    const dy = newest.y - old.y;
-    const speed = dtm > 1e-4 ? Math.hypot(dx, dy) / dtm : 0;
-    return { speed, dx, dy };
+    // The orb no longer follows the cursor — the cursor is the aim.
+    lastCursorX = e.clientX;
+    lastCursorY = e.clientY;
   }
 
   // When MAX_FLYING meteors are already airborne, detonate the oldest on the
@@ -772,41 +897,17 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     physics.remove(rec.handle); // onExpire splices flying + parks the orb
   }
 
-  function launch(orb: Orb, upX: number, upY: number): void {
+  function launch(orb: Orb): void {
     while (flying.length >= MAX_FLYING) detonateOldest();
     const spawn = orb.group.position;
-    if (!groundUnder(upX, upY, _aim)) _aim.set(spawn.x, terrainHeight(spawn.x, spawn.z), spawn.z);
+    // charge == force: the same floored 0..1 that sized the preview, so
+    // ImpactInfo.charge keeps its meaning for the scorer.
+    const charge = THREE.MathUtils.clamp(holdTime / CHARGE_TIME, MIN_FORCE, 1);
+    // throwVel is the arc the player was just shown (updatePreview runs every
+    // charging frame, and once in onDown) — fire THAT, not a re-solve, so the
+    // landing ring is honoured. The re-solve here is unreachable insurance.
+    if (!throwValid) computeThrow(charge, lastCursorX, lastCursorY, spawn);
 
-    const f = flick();
-    // Camera ground basis for leading the aim in the flick direction.
-    const e = camera.matrixWorld.elements;
-    _right.set(e[0], e[1], e[2]).setY(0);
-    if (_right.lengthSq() < 1e-6) _right.set(1, 0, 0);
-    _right.normalize();
-    _fwd.set(-e[8], 0, -e[10]);
-    if (_fwd.lengthSq() < 1e-6) _fwd.set(0, 0, -1);
-    _fwd.normalize();
-    // Flick up-screen (dy<0) leads forward toward the horizon; sideways leads laterally.
-    const mag = Math.hypot(f.dx, f.dy);
-    if (f.speed > 1 && mag > 1e-3) {
-      const lead = Math.min(mag * LEAD_K, LEAD_MAX);
-      const inv = 1 / mag;
-      _aim.addScaledVector(_right, f.dx * inv * lead).addScaledVector(_fwd, -f.dy * inv * lead);
-      _aim.y = terrainHeight(_aim.x, _aim.z);
-    }
-
-    const power = Math.min(f.speed / FLICK_FULL, 1);
-    const angle = ANGLE_BASE + (ANGLE_FLAT - ANGLE_BASE) * power;
-    if (!solveAngle(spawn, _aim, angle, _vel) && !solveAngle(spawn, _aim, ANGLE_STEEP, _vel)) {
-      // Unreachable arc — gentle forward lob so a throw always launches.
-      _tmp.copy(_aim).sub(spawn);
-      _tmp.y = 0;
-      if (_tmp.lengthSq() < 1e-6) _tmp.copy(_fwd);
-      _tmp.normalize();
-      _vel.set(_tmp.x * 16, 16, _tmp.z * 16);
-    }
-
-    const charge = Math.min(holdTime / CHARGE_TIME, 1);
     orb.group.scale.setScalar(0.6 + charge * 0.6);
     orb.core.scale.setScalar(1); // launches as a complete ball (arcs keep crackling in flight)
     orb.embers.visible = false;
@@ -815,9 +916,9 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const body = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(spawn.x, spawn.y, spawn.z)
-        .setLinvel(_vel.x, _vel.y, _vel.z)
+        .setLinvel(throwVel.x, throwVel.y, throwVel.z)
         .setAngvel({ x: (Math.random() - 0.5) * 6, y: (Math.random() - 0.5) * 6, z: (Math.random() - 0.5) * 6 })
-        .setLinearDamping(0.02)
+        .setLinearDamping(0) // zero drag: the flight must match the marched preview exactly
         .setCcdEnabled(true),
     );
     physics.world.createCollider(
@@ -863,7 +964,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     physics.add(rec.handle);
   }
 
-  function endGesture(launchIt: boolean, upX: number, upY: number): void {
+  function endGesture(launchIt: boolean): void {
     if (!charging) return;
     const orb = charging;
     charging = null;
@@ -871,30 +972,28 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       try { domElement.releasePointerCapture(pointerId); } catch { /* ignore */ }
       pointerId = -1;
     }
+    previewArc.visible = false;
+    previewRing.visible = false;
+    if (forceMeter) forceMeter.classList.remove("show");
     if (launchIt) {
-      launch(orb, upX, upY);
+      launch(orb);
     } else {
       park(orb);
     }
-    controls.enabled = true;
-    restoreTimer = window.setTimeout(() => {
-      controls.autoRotate = savedAutoRotate;
-      restoreTimer = undefined;
-    }, 1500);
   }
 
   function onUp(e: PointerEvent): void {
     if (!charging || e.pointerId !== pointerId) return;
     e.preventDefault();
     e.stopPropagation();
-    endGesture(true, e.clientX, e.clientY);
+    endGesture(true);
   }
   function onCancel(e: PointerEvent): void {
     if (!charging || e.pointerId !== pointerId) return;
-    endGesture(false, e.clientX, e.clientY);
+    endGesture(false);
   }
   function onBlur(): void {
-    if (charging) endGesture(false, 0, 0);
+    if (charging) endGesture(false);
   }
 
   domElement.addEventListener("pointerdown", onDown, true);
@@ -918,19 +1017,24 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   }
 
   return {
-    update(dt: number, time: number): void {
+    update(dt: number, time: number, dtReal: number): void {
       lastTime = time;
+      realClock += dtReal;
       lavaTime.value = time; // flow + flicker the lava veins on every meteor orb
       elecTime.value = time; // crackle the electric filaments on every water orb
 
       if (charging) {
-        holdTime += dt;
+        // The whole charge gesture runs on REAL time: the force meter, the arc
+        // and the accretion show must stay butter-smooth even while a hitstop
+        // freezes the sim. (Orbs in FLIGHT stay on sim dt below — they're physics.)
+        holdTime += dtReal;
+        anchorPos(charging.group.position); // stay glued to the slot through WASD/zoom
         const k = Math.min(holdTime / CHARGE_TIME, 1);
         const pulse = 0.85 + 0.15 * Math.sin(holdTime * 18);
         charging.coreGlow.value = (0.9 + k * 1.3) * pulse;
         charging.haloMat.opacity = (0.06 + k * 0.12) * pulse;
         charging.group.scale.setScalar(0.6 + k * 0.6);
-        charging.group.rotation.y += dt * 0.9;
+        charging.group.rotation.y += dtReal * 0.9;
         // The ball itself swells from a small seed as it swallows the rock.
         const coreScale = 0.5 + 0.5 * k;
         charging.core.scale.setScalar(coreScale);
@@ -940,12 +1044,12 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         // the whole loose cloud gathers into one clean sphere by full charge.
         const surface = ORB_R * coreScale;
         for (const fr of charging.frags) {
-          fr.ang += dt * fr.spin;
+          fr.ang += dtReal * fr.spin;
           const kp = Math.min(Math.max((k - fr.t0) / (1 - fr.t0), 0), 1); // this rock's own plunge 0..1
           const ease = kp * kp * (3 - 2 * kp);
           const rad = fr.rad * (1 - ease) + surface * 0.9 * ease;
           fr.mesh.position.set(Math.cos(fr.ang) * rad, fr.y * (1 - ease), Math.sin(fr.ang) * rad);
-          fr.mesh.rotation.x += dt * fr.spin * 0.5;
+          fr.mesh.rotation.x += dtReal * fr.spin * 0.5;
           fr.mesh.scale.setScalar(fr.base * (1 - ease)); // melts away as it lands
           fr.mesh.visible = ease < 0.985;
         }
@@ -953,8 +1057,8 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         const pos = charging.embers.geometry.attributes.position as THREE.BufferAttribute;
         const arr = pos.array as Float32Array;
         for (let e = 0; e < EMBERS; e++) {
-          charging.emAng[e] += dt * charging.emSpin[e];
-          charging.emY[e] += dt * charging.emVy[e];
+          charging.emAng[e] += dtReal * charging.emSpin[e];
+          charging.emY[e] += dtReal * charging.emVy[e];
           if (charging.emY[e] > 3) charging.emY[e] = -1.2;
           const rad = charging.emRad[e] * (0.7 + 0.3 * k);
           arr[e * 3] = Math.cos(charging.emAng[e]) * rad;
@@ -965,6 +1069,9 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
         // Water ball: arcs crackle louder as it charges.
         if (charging.arcs) updateOrbArcs(charging);
+
+        // Re-solve + redraw the arc, ring and meter for this frame's aim/force.
+        updatePreview();
       }
 
       for (let i = flying.length - 1; i >= 0; i--) {
@@ -1013,7 +1120,12 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       domElement.removeEventListener("pointerup", onUp, true);
       domElement.removeEventListener("pointercancel", onCancel, true);
       window.removeEventListener("blur", onBlur);
-      if (restoreTimer !== undefined) clearTimeout(restoreTimer);
+      scene.remove(previewArc, previewRing);
+      previewArc.geometry.dispose();
+      previewRing.geometry.dispose();
+      previewArcMat.dispose();
+      previewRingMat.dispose();
+      if (forceMeter) forceMeter.classList.remove("show", "water");
     },
   };
 }
