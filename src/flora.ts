@@ -8,6 +8,7 @@ import {
   type Placement,
   type FitOpts,
   type ScatterChunk,
+  type ProtoPart,
 } from "./assets";
 import { initialPreset, QUALITY } from "./quality";
 
@@ -279,6 +280,34 @@ function applyWind(mat: THREE.Material, strength: number): void {
 // Scatter a set of model variants across placements, splitting the placements
 // evenly between the variant URLs.
 // ---------------------------------------------------------------------------
+// The two leaf greens from assets COLOR_OVERRIDES; used to sway only tree
+// canopies (leafOnly) while the trunk material stays rigid.
+const LEAF_HEXES = [0x6cb83c, 0x2c6630];
+function isLeafMaterial(m: THREE.Material): boolean {
+  const col = (m as THREE.MeshStandardMaterial).color;
+  return col !== undefined && LEAF_HEXES.includes(col.getHex());
+}
+
+// Give a model's parts wind: clone the (shared, colour-cached) materials before
+// patching so only these instances sway — never every prop that happens to share
+// the colour. leafOnly patches just the canopy greens (trunk stays stiff).
+function applyWindToParts(parts: ProtoPart[], strength: number, leafOnly: boolean): void {
+  const patched = new Map<THREE.Material, THREE.Material>();
+  const windify = (m: THREE.Material): THREE.Material => {
+    if (leafOnly && !isLeafMaterial(m)) return m;
+    let c = patched.get(m);
+    if (!c) {
+      c = m.clone();
+      applyWind(c, strength);
+      patched.set(m, c);
+    }
+    return c;
+  };
+  for (const part of parts) {
+    part.material = Array.isArray(part.material) ? part.material.map(windify) : windify(part.material);
+  }
+}
+
 async function scatterVariants(
   scene: THREE.Scene,
   urls: string[],
@@ -287,6 +316,7 @@ async function scatterVariants(
   kind?: PropKind,
   castShadow = true,
   clearable = false,
+  wind?: { strength: number; leafOnly?: boolean },
 ): Promise<void> {
   shuffle(places);
   const per = Math.ceil(places.length / urls.length);
@@ -295,6 +325,7 @@ async function scatterVariants(
       const chunk = places.slice(i * per, (i + 1) * per);
       if (chunk.length === 0) return;
       const parts = extractParts(await loadScene(NATURE + url), opts);
+      if (wind) applyWindToParts(parts, wind.strength, wind.leafOnly ?? false);
       const ims = scatter(parts, chunk);
       for (const im of ims) {
         im.castShadow = castShadow;
@@ -334,15 +365,24 @@ const MUSHROOMS = ["mushroom_red.glb", "mushroom_tan.glb", "mushroom_redGroup.gl
 const LILIES = ["lily_large.glb", "lily_small.glb"];
 
 export async function populateFlora(scene: THREE.Scene): Promise<Flora> {
-  // Trees.
+  // Wind knobs from the boot preset: medium+ sways flowers + bushes, high also
+  // sways tree canopies (leaf materials only). Off on low.
+  const bootKnobs = QUALITY[initialPreset()];
+  const propWind = bootKnobs.windProps;
+  const leafWind = bootKnobs.windLeaves;
+
+  // Trees. Only the canopy sways (leafOnly) — trunks stay rigid, so it reads like
+  // a breeze in the treetops. Gentle: canopies are tall, so bend amplifies.
   const treePlaces = sampleLand(420, WATER_LEVEL + 1.2, 13, 3);
   setScale(treePlaces, 0.75, 1.4, 0.2);
-  const treesDone = scatterVariants(scene, TREES, treePlaces, { target: 6, fit: "height" }, "tree");
+  const treesDone = scatterVariants(scene, TREES, treePlaces, { target: 6, fit: "height" }, "tree", true, false,
+    leafWind ? { strength: 0.035, leafOnly: true } : undefined);
 
-  // Bushes.
+  // Bushes — whole model is foliage, so sway all of it.
   const bushPlaces = sampleLand(260, WATER_LEVEL + 0.7, 9, 3);
   setScale(bushPlaces, 0.7, 1.5);
-  const bushesDone = scatterVariants(scene, BUSHES, bushPlaces, { target: 1.3, fit: "height" }, "bush");
+  const bushesDone = scatterVariants(scene, BUSHES, bushPlaces, { target: 1.3, fit: "height" }, "bush", true, false,
+    propWind ? { strength: 0.06 } : undefined);
 
   // Rocks + stones.
   const rockPlaces = sampleLand(150, WATER_LEVEL - 0.5, 16, 100);
@@ -351,9 +391,11 @@ export async function populateFlora(scene: THREE.Scene): Promise<Flora> {
 
   // Flowers. Small ground cover — no shadow casting (cheaper shadow pass).
   // Clearable so a meteor crater doesn't leave them floating over the bowl.
+  // A touch livelier sway than grass — they're short, so absolute motion stays small.
   const flowerPlaces = sampleLand(900, WATER_LEVEL + 0.7, 8, 2.2);
   setScale(flowerPlaces, 0.7, 1.3);
-  const flowersDone = scatterVariants(scene, FLOWERS, flowerPlaces, { target: 0.6, fit: "height" }, undefined, false, true);
+  const flowersDone = scatterVariants(scene, FLOWERS, flowerPlaces, { target: 0.6, fit: "height" }, undefined, false, true,
+    propWind ? { strength: 0.1 } : undefined);
 
   // Mushrooms.
   const mushPlaces = sampleLand(120, WATER_LEVEL + 0.6, 8, 2);
@@ -368,7 +410,6 @@ export async function populateFlora(scene: THREE.Scene): Promise<Flora> {
   // Grass — a dense carpet from a single model, with wind. Scattered into a grid
   // of per-cell chunks (one shared wind material) so off-screen + far cells cull.
   // Density + view distance come from the boot quality preset (low thins it out).
-  const bootKnobs = QUALITY[initialPreset()];
   setGrassViewDistance(bootKnobs.grassViewDist);
   const grassPlaces = sampleLand(bootKnobs.grassCount, WATER_LEVEL + 0.2, 10, 3.5);
   setScale(grassPlaces, 0.8, 1.5, 0.3);
