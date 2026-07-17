@@ -399,32 +399,55 @@
           transform: scale(1.06);
         }
       }
+      /* Font size ramps per tier on the banner; the gradients below are shared
+         with the streak label so the two always read as the same tier. */
       #banner-main.t1 {
         font-size: 30px;
-        background-image: linear-gradient(90deg, #ffe9f6, #ffc2e2);
       }
       #banner-main.t2 {
         font-size: 38px;
-        background-image: linear-gradient(90deg, #fff0c2, #ffd166);
       }
       #banner-main.t3 {
         font-size: 46px;
-        background-image: linear-gradient(90deg, #ffd9a0, #ff9a4a);
       }
       #banner-main.t4 {
         font-size: 54px;
-        background-image: linear-gradient(90deg, #ffc46b, #ff6b3d);
       }
       #banner-main.t5 {
         font-size: 62px;
-        background-image: linear-gradient(90deg, #ffb0d8, #ff4d6d, #ffd166);
       }
       #banner-main.t6 {
         font-size: 70px;
-        background-image: linear-gradient(90deg, #ff9ad1, #ff2d55, #ffa500);
       }
       #banner-main.t7 {
         font-size: 80px;
+      }
+      #banner-main.t1,
+      #streak-label.t1 {
+        background-image: linear-gradient(90deg, #ffe9f6, #ffc2e2);
+      }
+      #banner-main.t2,
+      #streak-label.t2 {
+        background-image: linear-gradient(90deg, #fff0c2, #ffd166);
+      }
+      #banner-main.t3,
+      #streak-label.t3 {
+        background-image: linear-gradient(90deg, #ffd9a0, #ff9a4a);
+      }
+      #banner-main.t4,
+      #streak-label.t4 {
+        background-image: linear-gradient(90deg, #ffc46b, #ff6b3d);
+      }
+      #banner-main.t5,
+      #streak-label.t5 {
+        background-image: linear-gradient(90deg, #ffb0d8, #ff4d6d, #ffd166);
+      }
+      #banner-main.t6,
+      #streak-label.t6 {
+        background-image: linear-gradient(90deg, #ff9ad1, #ff2d55, #ffa500);
+      }
+      #banner-main.t7,
+      #streak-label.t7 {
         background-image: linear-gradient(90deg, #ffffff, #ff2d55, #ffd166, #8fd3ff);
       }
       #banner-sub {
@@ -453,6 +476,82 @@
         100% {
           opacity: 0;
           transform: translateY(-6px);
+        }
+      }
+
+      /* ---- Kill-streak widget (under the banner) ------------------------ */
+      #streak {
+        position: fixed;
+        top: calc(30% + 148px); /* clears the tallest banner (t7 80px) + sub line */
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 6;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        pointer-events: none;
+        user-select: none;
+        transition: opacity 0.25s ease;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      #streak.idle {
+        opacity: 0; /* no live streak — fade the widget out, like #chain-row.idle */
+      }
+      #streak-label {
+        font-weight: 800;
+        font-size: 15px;
+        letter-spacing: 1.2px;
+        background-clip: text;
+        -webkit-background-clip: text;
+        color: transparent;
+        background-image: linear-gradient(90deg, #ffe9f6, #ffc2e2); /* until a tN lands */
+        filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
+      }
+      #streak-label.bump {
+        animation: streak-bump 0.25s ease-out;
+      }
+      @keyframes streak-bump {
+        0% {
+          transform: scale(1.35);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+      #streak-bar {
+        width: 180px;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(24, 16, 38, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        overflow: hidden;
+      }
+      /* Width is driven per-frame from JS (the countdown), so no transition here. */
+      #streak-fill {
+        height: 100%;
+        width: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ffd166, #ff6b9d);
+        box-shadow: 0 0 10px rgba(255, 150, 200, 0.8);
+      }
+      /* Time nearly out: the bar pulses red. Animate the bar child, not #streak
+         itself, so the pulse can't clobber the container's translateX centering
+         (the same reason #timer.urgent re-states its translate). */
+      #streak.urgent #streak-bar {
+        animation: streak-urgent 0.4s ease-in-out infinite;
+      }
+      #streak.urgent #streak-fill {
+        background: linear-gradient(90deg, #ff8fa8, #ff2d55);
+        box-shadow: 0 0 12px rgba(255, 60, 100, 0.95);
+      }
+      @keyframes streak-urgent {
+        0%,
+        100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.1);
         }
       }
 
@@ -521,6 +620,11 @@
     <div id="banner">
       <div id="banner-main"></div>
       <div id="banner-sub"></div>
+    </div>
+
+    <div id="streak" class="idle">
+      <div id="streak-label"></div>
+      <div id="streak-bar"><div id="streak-fill"></div></div>
     </div>
 
     <div id="pops"></div>

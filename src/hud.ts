@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import * as THREE from "three";
-import type { ScoreEvent, RunSummary, LifetimeStats } from "./score";
+import type { ScoreEvent, RunSummary, LifetimeStats, StreakState } from "./score";
 import type { Sfx } from "./sfx";
 
 const POP_POOL = 24;
@@ -30,6 +30,8 @@ interface Pop {
 export interface Hud {
   setScore(v: number): void;
   setChain(mult: number, remaining01: number): void;
+  /** Drive the streak countdown bar; hides itself when no streak is live. */
+  setStreak(s: StreakState): void;
   setCount(n: number): void;
   /** null hides the clock entirely (menu / Zen). */
   setTimer(seconds: number | null): void;
@@ -62,6 +64,9 @@ export function createHud(): Hud {
   const timerEl = document.getElementById("timer")!;
   const bannerMain = document.getElementById("banner-main")!;
   const bannerSub = document.getElementById("banner-sub")!;
+  const streakEl = document.getElementById("streak")!;
+  const streakLabel = document.getElementById("streak-label")!;
+  const streakFill = document.getElementById("streak-fill")!;
   const popsEl = document.getElementById("pops")!;
   const menuStatsEl = document.getElementById("menu-stats")!;
   const endcardEl = document.getElementById("endcard")!;
@@ -90,6 +95,9 @@ export function createHud(): Hud {
   let bannerHold = 0; // seconds left before a same-or-lower tier may replace
   let bannerTier = 0;
   let queued: { label: string; tier: number } | null = null;
+
+  // Last streak tier seen (from a "streak" event) — also the pitch fed to popTick.
+  let streakTier = 0;
 
   // All-time body count roll-up on the end card (< 0 = idle).
   let rollT = -1;
@@ -152,6 +160,18 @@ export function createHud(): Hud {
         lastMultText = text;
         chainMultEl.textContent = text;
       }
+    },
+
+    setStreak(s: StreakState): void {
+      const live = s.count > 0 && s.remaining01 > 0;
+      streakEl.classList.toggle("idle", !live);
+      if (!live) {
+        streakEl.classList.remove("urgent");
+        streakTier = 0;
+        return;
+      }
+      streakFill.style.width = `${(s.remaining01 * 100).toFixed(1)}%`;
+      streakEl.classList.toggle("urgent", s.remaining01 < 0.25);
     },
 
     setCount(n: number): void {
@@ -234,6 +254,7 @@ export function createHud(): Hud {
             // Size the pop by how big the number is — a 3,200 should shout.
             const big = e.points >= 5000 ? 2 : e.points >= 1000 ? 1 : 0;
             pop(e.worldPos, `+${e.points.toLocaleString("en-US")}`, big);
+            sfx.popTick(streakTier); // a coin blip on every number, pitched by streak
             break;
           }
           case "banner":
@@ -253,6 +274,16 @@ export function createHud(): Hud {
             banner(e.label, 6);
             sfx.killFanfare(6);
             break;
+          case "streak": {
+            if (!e.label) break;
+            // Retrigger the bump the same way the banner retriggers its pop.
+            streakTier = Math.min(Math.max(e.tier ?? 1, 1), 7);
+            streakLabel.className = "";
+            void streakLabel.offsetWidth; // force reflow
+            streakLabel.textContent = e.label;
+            streakLabel.className = `t${streakTier} bump`;
+            break;
+          }
         }
       }
     },

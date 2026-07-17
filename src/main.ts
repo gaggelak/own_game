@@ -554,9 +554,22 @@ if (import.meta.env.DEV) {
       }
       return best;
     },
+    /** Advance sim time + the score/HUD plumbing one step. The Browser pane runs
+     *  rAF-paused, so the streak countdown + banks need a hand-cranked frame. */
+    tick(dt = 1 / 60) {
+      simTime += dt;
+      hud.applyEvents(score.update(simTime), sfx);
+      const cs = score.chainState();
+      hud.setChain(cs.mult, cs.remaining01);
+      hud.setStreak(score.streakState());
+      hud.setScore(score.current().score);
+      hud.update(dt, camera);
+    },
     score,
     herd,
     game,
+    hud,
+    sfx,
     // The Browser pane runs hidden (rAF paused), so tests drive the sim by hand:
     // step physics + meteors manually, read the camera/controls band directly.
     meteors,
@@ -699,6 +712,7 @@ function frame(): void {
   // Score readout + the chain meter burning down, then the world-anchored pops.
   const chain = score.chainState();
   hud.setChain(chain.mult, chain.remaining01);
+  hud.setStreak(score.streakState());
   hud.setScore(score.current().score);
   hud.update(dtReal, camera);
 
