@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { fbm, valueNoise } from "./noise";
+import { initialPreset, QUALITY } from "./quality";
 
 export const WORLD = 240; // terrain spans -120..120
 export const WATER_LEVEL = 0;
@@ -188,29 +189,131 @@ export function buildTerrain(): Terrain {
   // vertex positions on the CPU every frame — identical look, no per-frame loop.
   const wgeo = new THREE.PlaneGeometry(WORLD, WORLD, 80, 80);
   wgeo.rotateX(-Math.PI / 2);
-  const wmat = new THREE.MeshStandardMaterial({
+
+  // Bake a per-vertex "depth below the waterline" from the PRISTINE ground, so
+  // the fragment shader can tint deep water darker and lick foam onto the
+  // shoreline with no render target and no per-frame CPU work. Lakebeds are never
+  // crater-clamped, so this stays correct for the whole run.
+  const wpos = wgeo.attributes.position;
+  const depths = new Float32Array(wpos.count);
+  for (let i = 0; i < wpos.count; i++) {
+    depths[i] = WATER_LEVEL - terrainHeight(wpos.getX(i), wpos.getZ(i));
+  }
+  wgeo.setAttribute("aDepth", new THREE.BufferAttribute(depths, 1));
+
+  const water = new THREE.Mesh(wgeo, buildWaterMaterial());
+  water.position.y = WATER_LEVEL;
+
+  return { mesh, water, geo };
+}
+
+// The wave displacement (kept identical to the original so `low` water is a byte
+// match): y += sin(px*0.18 + t*1.4)*0.13 + cos(pz*0.22 + t*1.1)*0.13.
+const WAVE_VERT = `transformed.y += sin(position.x * 0.18 + uTime * 1.4) * 0.13
+                       + cos(position.z * 0.22 + uTime * 1.1) * 0.13;`;
+
+// Preset-driven water: `low` keeps the flat translucent plane with just the wave
+// bob; medium/high add analytic wave normals (so the sun glints across crests),
+// a depth tint, a fresnel edge that picks up the pastel sky, and a soft animated
+// shoreline foam. High adds a second high-frequency normal octave + bloom-crossing
+// sparkle glints. All in the one onBeforeCompile — no render targets.
+function buildWaterMaterial(): THREE.MeshStandardMaterial {
+  const knobs = QUALITY[initialPreset()];
+  const mat = new THREE.MeshStandardMaterial({
     color: 0x5fc6e0,
     transparent: true,
     opacity: 0.74,
     roughness: 0.12,
-    metalness: 0.25,
+    // Chrome-lake guard: with IBL on (medium/high) the envmap would over-reflect
+    // a metallic water, so drop metalness where the extra shading takes over.
+    metalness: knobs.waterExtra ? 0.1 : 0.25,
   });
-  wmat.onBeforeCompile = (shader) => {
+
+  if (!knobs.waterExtra) {
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = waterTime;
+      shader.vertexShader =
+        "uniform float uTime;\n" +
+        shader.vertexShader.replace("#include <begin_vertex>", `#include <begin_vertex>\n        ${WAVE_VERT}`);
+    };
+    mat.customProgramCacheKey = () => "water";
+    return mat;
+  }
+
+  const sparkle = knobs.waterSparkle;
+  mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = waterTime;
+    shader.uniforms.uShallow = { value: new THREE.Color(0x86dbe0) };
+    shader.uniforms.uDeep = { value: new THREE.Color(0x1f7fa8) };
+    shader.uniforms.uEdge = { value: new THREE.Color(0xffd9ec) };
+
     shader.vertexShader =
-      "uniform float uTime;\n" +
-      shader.vertexShader.replace(
-        "#include <begin_vertex>",
-        `#include <begin_vertex>
-        transformed.y += sin(position.x * 0.18 + uTime * 1.4) * 0.13
-                       + cos(position.z * 0.22 + uTime * 1.1) * 0.13;`,
+      `uniform float uTime;
+       attribute float aDepth;
+       varying float vDepth;
+       varying vec3 vWPos;
+       varying vec3 vWNormal;\n` +
+      shader.vertexShader
+        .replace(
+          "#include <beginnormal_vertex>",
+          // Analytic normal from the exact wave derivatives, plus (high) a faster,
+          // finer octave used ONLY in the normal — micro-ripple glints, no extra
+          // vertex displacement.
+          `float wnx = 0.0234 * cos(position.x * 0.18 + uTime * 1.4);
+           float wnz = -0.0286 * sin(position.z * 0.22 + uTime * 1.1);
+           ${sparkle ? `wnx += 0.027 * cos(position.x * 0.9 + uTime * 3.2);
+           wnz += -0.033 * sin(position.z * 1.1 + uTime * 2.6);` : ``}
+           vec3 objectNormal = normalize(vec3(-wnx, 1.0, -wnz));`,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+           ${WAVE_VERT}
+           vDepth = aDepth;
+           vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+           vWNormal = normalize(mat3(modelMatrix) * objectNormal);`,
+        );
+
+    shader.fragmentShader =
+      `uniform vec3 uShallow;
+       uniform vec3 uDeep;
+       uniform vec3 uEdge;
+       uniform float uTime;
+       varying float vDepth;
+       varying vec3 vWPos;
+       varying vec3 vWNormal;\n` +
+      shader.fragmentShader.replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+         float wx = vWPos.x, wz = vWPos.z;
+         // Deeper water reads darker + more saturated; shallows go milky pastel.
+         // The ponds are shallow (~3-4 units), so saturate quickly (by ~2 units)
+         // or the teal never shows.
+         float depthT = smoothstep(0.3, 2.0, vDepth);
+         vec3 wcol = mix(uShallow, uDeep, depthT);
+         // Fresnel: grazing angles (far lake edges at this camera pitch) pick up
+         // the pastel sky and turn more opaque — a cheap stand-in for reflection.
+         vec3 V = normalize(cameraPosition - vWPos);
+         float fres = pow(1.0 - clamp(dot(normalize(vWNormal), V), 0.0, 1.0), 3.0);
+         wcol += uEdge * fres * 0.22;
+         // Deep water hides more of the bright lakebed, so the tint actually reads.
+         float alpha = clamp(0.6 + depthT * 0.3 + fres * 0.2, 0.6, 0.95);
+         // A thin animated shoreline lick from the baked shore distance — kept
+         // narrow (only the first ~0.3 units of depth) so it reads as foam, not ice.
+         float foam = smoothstep(0.28, 0.03, vDepth
+                      + sin(wx * 2.1 + uTime * 1.7) * 0.07
+                      + sin(wz * 1.7 - uTime * 1.3) * 0.07);
+         wcol = mix(wcol, vec3(0.92), foam * 0.5);
+         alpha = max(alpha, foam * 0.8);
+         ${sparkle ? `// Occasional crest pixels cross the bloom threshold → twinkle.
+         float spark = step(0.997, sin(wx * 13.7 + uTime * 3.0) * sin(wz * 11.3 - uTime * 2.2));
+         wcol += spark * 0.6;` : ``}
+         diffuseColor.rgb = wcol;
+         diffuseColor.a = alpha;`,
       );
   };
-  wmat.customProgramCacheKey = () => "water";
-  const water = new THREE.Mesh(wgeo, wmat);
-  water.position.y = WATER_LEVEL;
-
-  return { mesh, water, geo };
+  mat.customProgramCacheKey = () => "water" + (sparkle ? "H" : "M");
+  return mat;
 }
 
 const _scorch = new THREE.Color(0x241a12);
