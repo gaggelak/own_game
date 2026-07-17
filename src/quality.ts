@@ -2,11 +2,21 @@
 // Quality presets: one place that decides how pretty vs how cheap the frame is.
 //
 // Three tiers. `low` is byte-for-byte today's pipeline (the regression anchor):
-// no AA, no AO, no colour grade, 1024 shadows, 30k grass, pixelRatio 1.0. `high`
-// is everything on. `medium` (the default) is the sweet spot — it deliberately
-// skips ambient occlusion, because GTAO re-renders the whole scene into a normal
-// buffer and that extra geometry pass is too expensive to guarantee 60fps with
-// ~100 skinned unicorns on a mid GPU. AO is a high-only luxury.
+// no AA, no colour grade, 1024 shadows, 30k grass, pixelRatio 1.0. `medium` (the
+// default) adds the cheap, high-value wins — FXAA, IBL, 2048 shadows, the water
+// shading, the colour grade, flower/bush wind. `high` sharpens further: SMAA,
+// soft shadows, tilt-shift, water sparkle, tree-leaf wind, pollen + a fuller
+// butterfly count.
+//
+// AO is deliberately OFF in every preset. The GTAOPass integration works (and is
+// still wired in postfx for experimentation / a future revisit), but its normal
+// G-buffer re-renders the whole scene — and with ~100 skinned unicorns that
+// second skinned pass roughly DOUBLES frame time (measured ~16ms → ~31ms at 100),
+// which half-res can't fix (skinning cost is per-vertex, not per-pixel). GTAO has
+// no cheap per-object exclusion, and excluding the herd cleanly would need
+// layer changes in the fase-2-owned unicorn code. Its actual visual gain here is
+// a subtle crevice darkening the directional shadows + crater soot already imply,
+// so it isn't worth the cost. Flip a preset's `ao` back on if that ever changes.
 //
 // This module is a leaf: it imports nothing from the game, so flora/postfx/sky
 // can all read the knob table without an import cycle. It owns preset
@@ -20,7 +30,8 @@ export interface QualityKnobs {
   pixelRatioCap: number;
   /** Anti-aliasing: FXAA (cheap, post-tonemap) or SMAA (sharper, pre-bloom). */
   aa: "none" | "fxaa" | "smaa";
-  /** GTAO ambient occlusion (high only — the normal G-buffer pass is costly). */
+  /** GTAO ambient occlusion. Off in every preset — the normal G-buffer pass
+   *  doubles frame time with the 100-unicorn herd (see the note at the top). */
   ao: boolean;
   /** Directional-light shadow map resolution. */
   shadowMapSize: number;
@@ -87,7 +98,7 @@ export const QUALITY: Record<QualityPreset, QualityKnobs> = {
   high: {
     pixelRatioCap: 1.5,
     aa: "smaa",
-    ao: true,
+    ao: false, // see the AO note at the top — too costly with the skinned herd
     shadowMapSize: 2048,
     shadowSoft: true,
     grassCount: 70000,
