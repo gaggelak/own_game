@@ -47,8 +47,11 @@ const hornMat = new THREE.MeshStandardMaterial({
   color: 0xffd34d,
   roughness: 0.22,
   metalness: 0.7,
-  emissive: 0x6a4a00,
-  emissiveIntensity: 0.4,
+  // Warmer, brighter emissive so each horn is a magical pinprick that just tickles
+  // bloom — a herd of embers at density. Kept under ~0.9 so 100 clustered horns
+  // shimmer at their sun-catching tips rather than smearing white.
+  emissive: 0xffb830,
+  emissiveIntensity: 0.75,
 });
 
 // Flowing rainbow mane: a shader on the shared "Hair" material so every
@@ -73,7 +76,7 @@ function applyRainbowMane(mat: THREE.MeshStandardMaterial): void {
       )
       .replace(
         "#include <emissivemap_fragment>",
-        "#include <emissivemap_fragment>\n  totalEmissiveRadiance += maneCol * 0.25;",
+        "#include <emissivemap_fragment>\n  totalEmissiveRadiance += maneCol * 0.35;",
       );
   };
   mat.customProgramCacheKey = () => "rainbowMane";
