@@ -55,6 +55,9 @@ const MILESTONES: { at: number; title: string }[] = [
 ];
 
 // End-of-run rank thresholds (TUNABLE — first-pass guesses, tune by feel).
+// NOTE (fase 2, 5× unicorns): with denser herds the same-blast ladder
+// (100·n·2^(n−1), registerBlast below) explodes — a single 10-kill blast pays
+// 512k raw, already past the S line. Retune these after the fase-2 playtest.
 const RANKS: { at: number; rank: Rank }[] = [
   { at: 150000, rank: "S" },
   { at: 60000, rank: "A" },

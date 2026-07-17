@@ -371,8 +371,11 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
     scene.add(wrapper);
 
     // Horn lives in world space and tracks the head bone each frame.
+    // No shadow: the horn is a thin gold spike whose cast shadow is invisible in
+    // practice, and skipping it drops one shadow-pass draw call per unicorn — real
+    // headroom once the herd is 60–100 strong.
     const horn = new THREE.Mesh(HORN_GEO, hornMat);
-    horn.castShadow = true;
+    horn.castShadow = false;
     horn.scale.setScalar(HORN_WORLD_SIZE / HORN_NATIVE_H);
     horn.rotation.order = "YXZ";
     scene.add(horn);

@@ -23,12 +23,12 @@ export type GameState = "menu" | "zen" | "levelIntro" | "playing" | "interstitia
 // The clock grows with the herd, so later levels aren't harder because there's
 // more arithmetic — they're harder because the herd is faster and spookier, and
 // a big cluster takes real herding to build.
-const LEVEL_COUNT_BASE = 6;
-const LEVEL_COUNT_STEP = 2;
-const LEVEL_COUNT_MAX = 24;
+const LEVEL_COUNT_BASE = 20;
+const LEVEL_COUNT_STEP = 4;
+const LEVEL_COUNT_MAX = 100;
 const LEVEL_TIME_BASE = 15;
-const LEVEL_TIME_PER_UNICORN = 3.5;
-const LEVEL_TIME_MAX = 120;
+const LEVEL_TIME_PER_UNICORN = 1.3;
+const LEVEL_TIME_MAX = 150;
 const TIME_PER_KILL: number = 0; // optional "kills buy time" — off by default
 
 const INTRO_TIME = 2.2;
@@ -40,9 +40,9 @@ const COUNTDOWN_FROM = 5; // seconds of ticking before the buzzer
 
 // Zen: keep the meadow stocked, trickling replacements in rather than popping a
 // burst — a massacre should refill visibly, not blink back.
-const ZEN_TARGET_POP = 14;
-const ZEN_RESPAWN_MIN = 2.5;
-const ZEN_RESPAWN_VAR = 1.5;
+const ZEN_TARGET_POP = 60;
+const ZEN_RESPAWN_MIN = 0.5;
+const ZEN_RESPAWN_VAR = 0.5;
 
 interface LevelCfg {
   count: number;

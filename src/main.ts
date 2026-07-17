@@ -507,7 +507,7 @@ const ambience = createAmbience(scene);
 // ---------------------------------------------------------------------------
 // Unicorns (imported animated horse + gold horn)
 // ---------------------------------------------------------------------------
-const herd = await createHerd(scene, 14);
+const herd = await createHerd(scene, 60);
 hud.setCount(herd.aliveCount());
 
 // The run: PLAY wipes this backdrop herd and starts the level gauntlet; ZEN
@@ -563,6 +563,7 @@ if (import.meta.env.DEV) {
     physics,
     controls,
     camera,
+    renderer, // renderer.info.render.calls — draw-call count for perf checks
   };
 }
 
