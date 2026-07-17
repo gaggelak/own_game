@@ -350,6 +350,9 @@ function handleImpact(
   kind: WeaponKind,
   info: ImpactInfo,
 ): void {
+  // Cinematic kick: a chromatic-aberration + vignette pulse scaled by blast size
+  // (the grade pass decays it over ~0.1-0.2s). Fires for any impact.
+  postfx.pulse(THREE.MathUtils.clamp(radius / 16, 0.3, 1));
   if (kind === "waterball") {
     // Electric water ball: a splashy electric burst. Unicorns in range don't die
     // instantly — they're left STANDING + electrified (herd.electrocuteAt),
