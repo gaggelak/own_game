@@ -78,6 +78,10 @@ export interface Sfx {
   killFanfare(tier: number): void;
   /** "Ka-ching" when a combo chain banks; pitch rises mildly with the mult. */
   chainBank(mult: number): void;
+  /** A short coin blip per floating score pop. Pitch rises with the streak tier
+   *  and climbs within a volley; rate-limited so a burst reads as a run, not a
+   *  wall of noise. */
+  popTick(tier: number): void;
   /** Major fanfare when a level is wiped out. */
   levelClear(): void;
   /** One blip per second over the last few seconds of a level. */
@@ -106,6 +110,11 @@ export function createSfx(): Sfx {
   let continuousElectric: AudioBuffer | null = null; // looped while unicorns are electrified
   let loopSrc: AudioBufferSourceNode | null = null;
   let loopGain: GainNode | null = null;
+  // Pop-tick scheduling: a cursor that staggers same-frame pops into a rising
+  // arpeggio (the classic coin cascade) instead of stacking them on one instant.
+  let popNextAt = 0; // earliest ctx time the next tick may sound
+  let popPrevAt = -10; // when the previous tick was scheduled (for volley grouping)
+  let popVolley = 0; // index within the current volley → pentatonic climb
 
   function load(url: string, set: (b: AudioBuffer) => void): void {
     fetch(asset(url))
@@ -391,6 +400,27 @@ export function createSfx(): Sfx {
         src.start(now);
         src.stop(now + 0.06);
       }
+    },
+    popTick(tier: number) {
+      const s = stingerCtx();
+      if (!s) return;
+      const { c, m } = s;
+      const now = c.currentTime;
+      // Schedule at the cursor, so a clump of same-frame pops fans out at 40ms
+      // apart instead of blaring on one instant.
+      const at = Math.max(now, popNextAt);
+      if (at - now > 0.24) return; // already ~6 queued — drop the rest, don't lag
+      if (at - popPrevAt > 0.35) popVolley = 0; // a gap of silence starts a fresh run
+      popPrevAt = at;
+      popNextAt = at + 0.04; // the ~40ms rate limit
+      const t = Math.min(Math.max(Math.round(tier), 0), 7);
+      // C6 + 2 semitones per streak tier — an octave above killFanfare's C5 root,
+      // so it reads as a light coin, not a competing fanfare.
+      const root = 1046.5 * Math.pow(2, (t * 2) / 12);
+      const freq = root * Math.pow(2, PENTA[Math.min(popVolley, PENTA.length - 1)] / 12);
+      pluck(c, m, freq, at, 0.07, 0.09); // body — well under killFanfare's 0.1–0.25
+      pluck(c, m, freq * 2, at, 0.03, 0.05); // a quiet octave sparkle = the coin shimmer
+      popVolley++;
     },
     levelClear() {
       const s = stingerCtx();

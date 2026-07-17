@@ -11,6 +11,9 @@
 //   * A chain multiplier climbs while you keep destroying things (kills OR
 //     toppled props) and "banks" with a flourish when the window runs out.
 //     Banking is pure celebration — the points were already yours.
+//   * A kill streak counts kills ACROSS throws and drives the escalating
+//     ladder banners (DOUBLE KILL → EXTINCTION EVENT). It's a pure celebration
+//     layer on top of the scoring above — it changes no points, only the show.
 // ---------------------------------------------------------------------------
 
 import type * as THREE from "three";
@@ -26,8 +29,11 @@ const LONG_SHOT_PTS = 300;
 const OVERKILL_PTS = 250; // full charge spent on a single unicorn — comedy tax refund
 const OVERKILL_CHARGE = 0.95;
 const DOMINO_PTS = 75; // × chain depth, per contagion pop
+const STREAK_WINDOW = 5; // seconds after a kill before the streak banks (at tier 0)
+const STREAK_DECAY = 0.85; // window shrinks by this per ladder rung climbed
 
-// Same-blast kill ladder. tier drives HUD styling + the fanfare's pitch.
+// Cross-throw kill-streak ladder. tier drives HUD styling + the fanfare's
+// pitch; min is now the streak count (kills across throws), not same-blast n.
 interface Rung {
   min: number;
   label: string;
@@ -71,16 +77,17 @@ const STORE_KEY = "unicornMeadow.stats.v1";
 export type Rank = "S" | "A" | "B" | "C";
 
 export interface ScoreEvent {
-  kind: "points" | "banner" | "sub" | "bank" | "milestone";
+  kind: "points" | "banner" | "sub" | "bank" | "milestone" | "streak";
   /** Signed amount actually awarded (already multiplied by the chain). */
   points?: number;
   /** Anchor for a floating pop number (points events). */
   worldPos?: THREE.Vector3;
-  /** "TRIPLE KILL", "LONG SHOT", "DOMINO ×3", "GLUE FACTORY FOREMAN"… */
+  /** "TRIPLE KILL", "LONG SHOT", "DOMINO ×3", "1 MORE → TRIPLE KILL"… */
   label?: string;
   /** 1..7 → HUD styling + fanfare tier. */
   tier?: number;
-  /** Payload for events that carry a number the HUD needs (bank: the mult). */
+  /** Payload for events that carry a number the HUD needs (bank: the mult;
+   *  streak: the current streak count). */
   value?: number;
 }
 
@@ -115,6 +122,15 @@ export interface ChainState {
   remaining01: number;
 }
 
+export interface StreakState {
+  /** Kills in the live streak (0 = no streak running). */
+  count: number;
+  /** Tier of the ladder rung the count currently sits on (0 = below DOUBLE). */
+  tier: number;
+  /** Fraction of the current (shrinking) window still left, for the countdown. */
+  remaining01: number;
+}
+
 export interface Score {
   /** Meteor impact: the same-blast ladder, props, LONG SHOT, OVERKILL. */
   registerBlast(info: BlastInfo): ScoreEvent[];
@@ -125,9 +141,10 @@ export interface Score {
   /** Flat award — level time bonus, PHOTO FINISH. Untaxed by the chain, and
    *  silent: the caller owns how it's announced. */
   addBonus(points: number): void;
-  /** Advance the chain window on the sim clock; emits the bank celebration. */
+  /** Advance the chain + streak windows on the sim clock; emits bank events. */
   update(now: number): ScoreEvent[];
   chainState(): ChainState;
+  streakState(): StreakState;
   current(): { score: number; kills: number; bestChain: number; biggestBlast: number };
   resetRun(): void;
   /** End of run: persist lifetime bests, return the summary for the end card. */
@@ -165,6 +182,24 @@ function titleFor(kills: number): string | null {
   return title;
 }
 
+// The rung a streak of `n` sits on (LADDER is sorted high→low by min), or null
+// below DOUBLE KILL.
+function rungFor(n: number): Rung | null {
+  return LADDER.find((r) => n >= r.min) ?? null;
+}
+
+// The next rung up from `n` — what "1 MORE →" is pointing at. Null past the top.
+function nextRungFor(n: number): Rung | null {
+  for (let i = LADDER.length - 1; i >= 0; i--) if (LADDER[i].min > n) return LADDER[i];
+  return null;
+}
+
+// The streak window shrinks a notch per rung climbed, so higher streaks demand
+// faster follow-ups — the escalating pressure the playtester asked for.
+function streakWindow(n: number): number {
+  return STREAK_WINDOW * Math.pow(STREAK_DECAY, rungFor(n)?.tier ?? 0);
+}
+
 export function createScore(): Score {
   const stats = loadStats();
 
@@ -178,6 +213,12 @@ export function createScore(): Score {
   let mult = 1;
   let chainEnd = -1; // sim time the window expires (< 0 = no live chain)
   let chainWindowStart = 0;
+
+  // Streak state — the cross-throw ladder, purely for celebration.
+  let streak = 0;
+  let streakEnd = -1; // sim time the streak banks (< 0 = no live streak)
+  let streakStart = 0;
+  let streakBestTier = 0; // highest rung reached this streak (drives the bank tier)
   // The sim clock, refreshed every frame by update(). Impacts resolve between
   // frames, so they read the last known time rather than each taking a `now`.
   let lastNow = 0;
@@ -199,6 +240,31 @@ export function createScore(): Score {
   function bumpChain(n: number): void {
     mult = Math.min(mult + CHAIN_STEP * n, CHAIN_MAX);
     if (mult > bestChain) bestChain = mult;
+  }
+
+  // Feed `n` kills into the cross-throw streak: climb the ladder (a multi-kill
+  // jumps several rungs at once, but only the highest fires a banner), reset the
+  // shrinking window, and emit the live "1 MORE → …" prompt. Returns whether a
+  // rung was crossed, so a colliding DOMINO banner can step aside.
+  function addStreak(n: number, out: ScoreEvent[]): boolean {
+    const prev = rungFor(streak);
+    streak += n;
+    const cur = rungFor(streak);
+    const crossed = cur !== null && cur !== prev;
+    if (crossed) {
+      out.push({ kind: "banner", label: cur!.label, tier: cur!.tier });
+      if (cur!.tier > streakBestTier) streakBestTier = cur!.tier;
+    }
+    streakStart = lastNow;
+    streakEnd = lastNow + streakWindow(streak);
+    const next = nextRungFor(streak);
+    out.push({
+      kind: "streak",
+      label: next ? `${next.min - streak} MORE → ${next.label}` : `${cur!.label} ×${streak}`,
+      tier: Math.max(cur?.tier ?? 0, 1),
+      value: streak,
+    });
+    return crossed;
   }
 
   // Award `raw` points at the CURRENT multiplier (the chain you've already
@@ -239,8 +305,8 @@ export function createScore(): Score {
       if (n > 0) {
         // 100 · n · 2^(n−1): two kills pay 4×, five kills pay 80×.
         award(KILL_BASE * n * Math.pow(2, n - 1), out, info.point);
-        const rung = LADDER.find((r) => n >= r.min);
-        if (rung) out.push({ kind: "banner", label: rung.label, tier: rung.tier });
+        // The ladder banner now rides the cross-throw streak, not same-blast n.
+        addStreak(n, out);
         kills += n;
         if (n > biggestBlast) biggestBlast = n;
         countKills(n, out);
@@ -273,13 +339,14 @@ export function createScore(): Score {
       award(KILL_BASE, out, pos);
       kills += 1;
       countKills(1, out);
+      const crossed = addStreak(1, out);
       if (chainDepth >= 1) {
         award(DOMINO_PTS * chainDepth, out, pos);
-        out.push({
-          kind: "banner",
-          label: `DOMINO ×${chainDepth + 1}`,
-          tier: Math.min(chainDepth + 1, 7),
-        });
+        const label = `DOMINO ×${chainDepth + 1}`;
+        // One banner per moment — if this pop climbed a rung, the ladder wins
+        // the banner and DOMINO drops to the sub-line.
+        if (crossed) out.push({ kind: "sub", label });
+        else out.push({ kind: "banner", label, tier: Math.min(chainDepth + 1, 7) });
       }
       touchChain();
       bumpChain(1);
@@ -293,6 +360,16 @@ export function createScore(): Score {
     update(now: number): ScoreEvent[] {
       lastNow = now;
       const out: ScoreEvent[] = [];
+      // Streak banks first: its window (≤ 4.25s once celebrated) always expires
+      // before the chain's fixed 5s, so the two never bank on the same frame.
+      if (streakEnd >= 0 && now >= streakEnd) {
+        if (streak >= 2) {
+          out.push({ kind: "bank", label: `STREAK ×${streak}`, tier: streakBestTier, value: streak });
+        }
+        streak = 0;
+        streakEnd = -1;
+        streakBestTier = 0;
+      }
       if (chainEnd >= 0 && now >= chainEnd) {
         if (mult > 1) {
           out.push({ kind: "bank", label: `CHAIN ×${mult.toFixed(1)}`, tier: 2, value: mult });
@@ -309,6 +386,16 @@ export function createScore(): Score {
       return { mult, remaining01: Math.min(Math.max((chainEnd - lastNow) / span, 0), 1) };
     },
 
+    streakState(): StreakState {
+      if (streakEnd < 0) return { count: 0, tier: 0, remaining01: 0 };
+      const span = streakEnd - streakStart || STREAK_WINDOW;
+      return {
+        count: streak,
+        tier: rungFor(streak)?.tier ?? 0,
+        remaining01: Math.min(Math.max((streakEnd - lastNow) / span, 0), 1),
+      };
+    },
+
     current() {
       return { score, kills, bestChain, biggestBlast };
     },
@@ -320,6 +407,9 @@ export function createScore(): Score {
       biggestBlast = 0;
       mult = 1;
       chainEnd = -1;
+      streak = 0;
+      streakEnd = -1;
+      streakBestTier = 0;
     },
 
     commitRun(levelsCleared: number): RunSummary {
