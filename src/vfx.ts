@@ -225,6 +225,7 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
   const smokeVel = new Float32Array(SMOKE_CAP * 3);
   const smokeAge = new Float32Array(SMOKE_CAP);
   const smokeLife = new Float32Array(SMOKE_CAP);
+  const smokeGray = new Float32Array(SMOKE_CAP); // per-particle dark target grey
   const smokeGeo = new THREE.BufferGeometry();
   smokeGeo.setAttribute("position", new THREE.BufferAttribute(smokePos, 3));
   smokeGeo.setAttribute("color", new THREE.BufferAttribute(smokeCol, 3));
@@ -272,7 +273,22 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
   // start so swapping textures never toggles USE_MAP (which would recompile).
   const disc = buildDiscTemplate();
 
-  interface DecalRec { mesh: THREE.Mesh; cx: number; cz: number; radius: number; }
+  // Sim clock, refreshed each update() — decals stamp their birth against it.
+  let currentTime = 0;
+
+  interface DecalRec {
+    mesh: THREE.Mesh;
+    cx: number;
+    cz: number;
+    radius: number;
+    // Aging: scorch marks slowly heal, blood dries darker then fades. born is on
+    // the sim clock passed to update(); baseColor is the tint at spawn (blood
+    // darkens away from it).
+    born: number;
+    baseOpacity: number;
+    baseColor: THREE.Color;
+    kind: "scorch" | "blood";
+  }
 
   // Re-drape a decal's disc onto the current ground at (cx, cz), rotated by `yaw`
   // and scaled to `diameter`. Vertices ride terrainHeight (+ a hair) so scorch/
@@ -293,7 +309,7 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
     rec.radius = diameter * 0.5;
   }
 
-  function makeDecalPool(count: number, offset: number, renderOrder: number): DecalRec[] {
+  function makeDecalPool(count: number, offset: number, renderOrder: number, kind: "scorch" | "blood"): DecalRec[] {
     const pool: DecalRec[] = [];
     for (let i = 0; i < count; i++) {
       const mat = new THREE.MeshStandardMaterial({
@@ -316,7 +332,7 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
       mesh.renderOrder = renderOrder;
       mesh.frustumCulled = false;
       scene.add(mesh);
-      const rec: DecalRec = { mesh, cx: 0, cz: 0, radius: 1 };
+      const rec: DecalRec = { mesh, cx: 0, cz: 0, radius: 1, born: -1e9, baseOpacity: 0, baseColor: new THREE.Color(), kind };
       // Prewarm at a real terrain point so compileAsync links the program.
       drape(rec, 2, 0);
       pool.push(rec);
@@ -333,9 +349,12 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
     m.map = texture;
     m.color.setHex(tint);
     m.opacity = opacity;
+    rec.born = currentTime;
+    rec.baseOpacity = opacity;
+    rec.baseColor.setHex(tint);
   }
 
-  const decals = makeDecalPool(DECAL_CAP, -4, 2);
+  const decals = makeDecalPool(DECAL_CAP, -4, 2, "scorch");
   let decalHead = 0;
   function spawnDecal(point: THREE.Vector3, diameter: number, texture: THREE.Texture, tint: number, opacity: number): void {
     placeDecal(decals, decalHead, point, diameter, texture, tint, opacity);
@@ -344,7 +363,7 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
 
   // Blood gets its own ring so gore doesn't evict scorch, and vice versa; drawn
   // over scorch marks (renderOrder 3) with a stronger polygon offset.
-  const bloodDecals = makeDecalPool(BLOOD_DECAL_CAP, -5, 3);
+  const bloodDecals = makeDecalPool(BLOOD_DECAL_CAP, -5, 3, "blood");
   let bloodHead = 0;
   function spawnBloodDecal(point: THREE.Vector3, diameter: number, texture: THREE.Texture, tint: number, opacity: number): void {
     placeDecal(bloodDecals, bloodHead, point, diameter, texture, tint, opacity);
@@ -370,6 +389,30 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
   function discYaw(rec: DecalRec): number {
     const pos = rec.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
     return Math.atan2(pos.getZ(1) - rec.cz, pos.getX(1) - rec.cx);
+  }
+
+  // Age the decals so the aftermath evolves instead of freezing. Scorch holds
+  // full for 20s then heals over the next 70s (~90s total); blood dries darker
+  // over 25s (colour drifts toward the clot) then fades from 60→120s. Cheap: 26
+  // discs, opacity/colour writes only while a decal is still visible.
+  const _dry = new THREE.Color();
+  function ageDecals(): void {
+    for (const rec of decals) {
+      if (rec.baseOpacity <= 0) continue;
+      const age = currentTime - rec.born;
+      const m = rec.mesh.material as THREE.MeshStandardMaterial;
+      m.opacity = age < 20 ? rec.baseOpacity : rec.baseOpacity * Math.max(0, 1 - (age - 20) / 70);
+    }
+    for (const rec of bloodDecals) {
+      if (rec.baseOpacity <= 0) continue;
+      const age = currentTime - rec.born;
+      const m = rec.mesh.material as THREE.MeshStandardMaterial;
+      // Dry to a darker clot (down to 45% of the spawn tint) over the first 25s.
+      const dryT = Math.min(age / 25, 1);
+      _dry.copy(rec.baseColor).multiplyScalar(1 - dryT * 0.55);
+      m.color.copy(_dry);
+      m.opacity = age < 60 ? rec.baseOpacity : rec.baseOpacity * Math.max(0, 1 - (age - 60) / 60);
+    }
   }
 
   // ---- one shared flaring light (added now so materials compile with it) ---
@@ -443,8 +486,10 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
       smokeVel[k * 3 + 2] = (Math.random() - 0.5) * 1.5;
       smokeAge[k] = 0; smokeLife[k] = 1.2 + Math.random() * 1.1;
       smokeSize[k] = radius * (0.5 + Math.random() * 0.5);
-      const g = 0.16 + Math.random() * 0.16;
-      smokeCol[k * 3] = g * 1.1; smokeCol[k * 3 + 1] = g; smokeCol[k * 3 + 2] = g * 0.95;
+      // Spawn fire-lit warm rose; update chokes it to oily dark over the first
+      // third of life — the pastel-to-violent transition inside one system.
+      smokeGray[k] = 0.16 + Math.random() * 0.16;
+      smokeCol[k * 3] = 0.95; smokeCol[k * 3 + 1] = 0.55; smokeCol[k * 3 + 2] = 0.45;
       smokeAlpha[k] = 0;
     }
 
@@ -454,7 +499,9 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
     shake.addTrauma(THREE.MathUtils.clamp(radius / 13, 0.35, 1));
   }
 
-  function update(dt: number, _time: number): void {
+  function update(dt: number, time: number): void {
+    currentTime = time;
+    ageDecals();
     for (const f of fires) {
       if (!f.active) continue;
       f.age += dt;
@@ -515,10 +562,17 @@ export function createVfx(scene: THREE.Scene, shake: CameraShake): Vfx {
       smokePos[i * 3 + 2] += smokeVel[i * 3 + 2] * dt;
       smokeSize[i] += dt * 4;
       smokeAlpha[i] = Math.sin(Math.min(u, 1) * Math.PI) * 0.5;
+      // Warm rose → oily dark over the first 35% of life, then hold.
+      const warmT = Math.min(u / 0.35, 1);
+      const g = smokeGray[i];
+      smokeCol[i * 3] = 0.95 + (g * 1.1 - 0.95) * warmT;
+      smokeCol[i * 3 + 1] = 0.55 + (g - 0.55) * warmT;
+      smokeCol[i * 3 + 2] = 0.45 + (g * 0.95 - 0.45) * warmT;
       sDirty = true;
     }
     if (sDirty) {
       smokeGeo.attributes.position.needsUpdate = true;
+      smokeGeo.attributes.color.needsUpdate = true;
       smokeGeo.attributes.aSize.needsUpdate = true;
       smokeGeo.attributes.aAlpha.needsUpdate = true;
     }

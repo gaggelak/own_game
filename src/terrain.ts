@@ -6,7 +6,22 @@ export const WORLD = 240; // terrain spans -120..120
 export const WATER_LEVEL = 0;
 
 // Drives the water-ripple vertex shader; advanced once per frame from the loop.
+// Also reused as the clock for the crater rim-heat glow below.
 export const waterTime = { value: 0 };
+
+// Crater rim heat: the last few impact craters glow molten at the rim and cool to
+// black over ~10s, feeding bloom exactly like the meteor's own lava veins so the
+// blast and the wound it leaves share a material language. Six ring-buffered slots
+// (worldX, worldZ, radius, bornTime); born far in the past = an empty slot.
+const RIM_SLOTS = 6;
+const rimGlow = {
+  value: Array.from({ length: RIM_SLOTS }, () => new THREE.Vector4(0, 0, 1, -1e9)),
+};
+let rimCursor = 0;
+function registerRimHeat(cx: number, cz: number, radius: number): void {
+  rimGlow.value[rimCursor].set(cx, cz, radius, waterTime.value);
+  rimCursor = (rimCursor + 1) % RIM_SLOTS;
+}
 
 // Lake basins carved into the heightfield so water always has somewhere to sit.
 const lakes = [
@@ -180,6 +195,40 @@ export function buildTerrain(): Terrain {
     roughness: 0.95,
     metalness: 0,
   });
+  // Crater rim-heat glow: fresh craters glow molten and cool over ~10s. HDR
+  // emissive (values >1) so it punches through the locked bloom threshold like
+  // the meteor's lava veins. The soot vertex colours baked in by carveCrater stay
+  // as the permanent scar under the fading glow.
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = waterTime;
+    shader.uniforms.uGlow = rimGlow;
+    shader.vertexShader =
+      "varying vec3 vTerrWorld;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        vTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+      );
+    shader.fragmentShader =
+      `uniform float uTime;
+       uniform vec4 uGlow[${RIM_SLOTS}];
+       varying vec3 vTerrWorld;\n` +
+      shader.fragmentShader.replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        for (int i = 0; i < ${RIM_SLOTS}; i++) {
+          vec4 g = uGlow[i];
+          if (g.w < -1.0e8) continue;              // empty slot
+          float rn = length(vTerrWorld.xz - g.xy) / g.z;
+          float ring = smoothstep(0.55, 0.8, rn) * smoothstep(1.15, 0.95, rn);
+          float bowl = smoothstep(0.5, 0.0, rn) * 0.15; // faint hot floor, not a light pool
+          float heat = exp(-(uTime - g.w) / 3.5);   // cools to ~0 by ~10s
+          vec3 hot = mix(vec3(2.2, 0.5, 0.1), vec3(2.4, 1.2, 0.3), heat);
+          totalEmissiveRadiance += hot * (ring + bowl) * heat * 0.8;
+        }`,
+      );
+  };
+  mat.customProgramCacheKey = () => "terrainRimHeat";
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.castShadow = true;
@@ -394,6 +443,7 @@ export function carveCrater(
     resampleWindow(pos, col, nrm, n, cell, old.x, old.z, old.r * 1.3, null);
   }
   craters.push({ x: cx, z: cz, r: radius, depth });
+  registerRimHeat(cx, cz, radius);
   resampleWindow(pos, col, nrm, n, cell, cx, cz, radius * 1.3, { radius });
 
   pos.needsUpdate = true;
