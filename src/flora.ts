@@ -9,6 +9,7 @@ import {
   type FitOpts,
   type ScatterChunk,
 } from "./assets";
+import { initialPreset, QUALITY } from "./quality";
 
 // Shared wind time, updated each frame from the main loop.
 const windTime = { value: 0 };
@@ -31,10 +32,16 @@ let impactCursor = 0;
 // cull uses true 3D distance to the chunk centre, so zooming/craning the camera
 // up and out also drops the grass (not just panning it off-screen).
 const GRASS_CELL = 24;
-const MAX_GRASS_DIST = 170; // grass beyond this (to a chunk's centre) is hidden
-// Slack of one half-cell diagonal so a chunk stays fully drawn out to
-// MAX_GRASS_DIST before its centre crosses the threshold (no visible cull ring).
-const GRASS_CULL_SQ = (MAX_GRASS_DIST + GRASS_CELL * 0.71) ** 2;
+// Grass view distance is preset-driven (low trims it in) and can change live
+// when the player cycles quality, so it's a mutable cull threshold rather than a
+// const. Default matches the medium/high MAX (170) until a preset overrides it.
+// Slack of one half-cell diagonal so a chunk stays fully drawn out to the view
+// distance before its centre crosses the threshold (no visible cull ring).
+let grassCullSq = (170 + GRASS_CELL * 0.71) ** 2;
+/** Set the grass chunk view distance (world units). Hot-swappable per preset. */
+export function setGrassViewDistance(dist: number): void {
+  grassCullSq = (dist + GRASS_CELL * 0.71) ** 2;
+}
 const grassChunks: ScatterChunk[] = [];
 
 const NATURE = "/models/nature/";
@@ -360,7 +367,10 @@ export async function populateFlora(scene: THREE.Scene): Promise<Flora> {
 
   // Grass — a dense carpet from a single model, with wind. Scattered into a grid
   // of per-cell chunks (one shared wind material) so off-screen + far cells cull.
-  const grassPlaces = sampleLand(70000, WATER_LEVEL + 0.2, 10, 3.5);
+  // Density + view distance come from the boot quality preset (low thins it out).
+  const bootKnobs = QUALITY[initialPreset()];
+  setGrassViewDistance(bootKnobs.grassViewDist);
+  const grassPlaces = sampleLand(bootKnobs.grassCount, WATER_LEVEL + 0.2, 10, 3.5);
   setScale(grassPlaces, 0.8, 1.5, 0.3);
   const grassDone = (async () => {
     const parts = extractParts(await loadScene(NATURE + "grass.glb"), {
@@ -399,7 +409,7 @@ export async function populateFlora(scene: THREE.Scene): Promise<Flora> {
           const dx = chunk.cx - cameraPos.x;
           const dy = chunk.cy - cameraPos.y;
           const dz = chunk.cz - cameraPos.z;
-          const visible = dx * dx + dy * dy + dz * dz < GRASS_CULL_SQ;
+          const visible = dx * dx + dy * dy + dz * dz < grassCullSq;
           for (const im of chunk.meshes) im.visible = visible;
         }
       }

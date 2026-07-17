@@ -1,9 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
-import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { createPostFX } from "./postfx";
 import { buildTerrain, terrainHeight, carveCrater, waterTime } from "./terrain";
 import { populateFlora } from "./flora";
 import { createHerd } from "./unicorn";
@@ -253,8 +250,11 @@ scene.add(sun.target);
 // centre to the shadow-map texel grid stops the shadows crawling as you pan.
 const sunDir = sun.position.clone().normalize();
 const sunDist = sun.position.length();
-const WORLD_PER_TEXEL = (2 * shadowExtent) / sun.shadow.mapSize.x;
 function updateShadow(): void {
+  // Recompute the texel size each frame from the live map resolution — the
+  // quality preset can swap the shadow map between 1024 and 2048 at runtime, and
+  // the snap grid must track it or the shadows crawl after a switch.
+  const WORLD_PER_TEXEL = (2 * shadowExtent) / sun.shadow.mapSize.x;
   const sx = Math.round(controls.target.x / WORLD_PER_TEXEL) * WORLD_PER_TEXEL;
   const sz = Math.round(controls.target.z / WORLD_PER_TEXEL) * WORLD_PER_TEXEL;
   sun.target.position.set(sx, 0, sz);
@@ -581,23 +581,16 @@ if (import.meta.env.DEV) {
 }
 
 // ---------------------------------------------------------------------------
-// Post-processing: bloom so the explosion, embers, horn and rainbow glow.
-// RenderPass writes linear HDR into the composer target (the renderer skips
-// per-material tone mapping when drawing to a render target); OutputPass applies
-// ACESFilmic + exposure + sRGB last, so brightness matches the pre-bloom look.
+// Post-processing + quality presets. The whole composer chain (bloom so the
+// explosion, embers, horn and rainbow glow, plus AA / AO / colour grade / the
+// quality tiers) lives in postfx.ts; here we just hold the handle. RenderPass
+// still writes linear HDR and OutputPass still applies ACESFilmic + exposure +
+// sRGB last — the bloom look is unchanged. Press G to cycle quality.
 // ---------------------------------------------------------------------------
-const composer = new EffectComposer(renderer);
-composer.setPixelRatio(renderer.getPixelRatio());
-composer.setSize(window.innerWidth, window.innerHeight);
-composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.6, // strength
-  0.5, // radius
-  0.85, // threshold
-);
-composer.addPass(bloom);
-composer.addPass(new OutputPass());
+const postfx = createPostFX(renderer, scene, camera, sun);
+if (import.meta.env.DEV) {
+  (window as unknown as { __dev: Record<string, unknown> }).__dev.postfx = postfx;
+}
 
 // ---------------------------------------------------------------------------
 // Resize
@@ -605,8 +598,7 @@ composer.addPass(new OutputPass());
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  composer.setSize(window.innerWidth, window.innerHeight);
+  postfx.resize(window.innerWidth, window.innerHeight);
 });
 
 // ---------------------------------------------------------------------------
@@ -617,7 +609,7 @@ window.addEventListener("resize", () => {
 await renderer.compileAsync(scene, camera);
 // Compile the post-processing shaders too, so the first interactive frame
 // doesn't hitch when the bloom/output programs link.
-composer.render();
+postfx.warm();
 
 const clock = new THREE.Clock();
 const shakeOffset = new THREE.Vector3();
@@ -717,13 +709,18 @@ function frame(): void {
   hud.setScore(score.current().score);
   hud.update(dtReal, camera);
 
+  // Drive the colour grade (hitstop desat, combo vibrance, impact pulses) and
+  // feed the quality auto-detector — all on real time so a frozen frame still
+  // grades correctly.
+  postfx.update(dtReal, hitstopLeft > 0 ? 1 : 0, chain.mult);
+
   // Apply camera shake as a transient offset around the render only (meteor
   // blasts + electric bursts feed one shared trauma pool). On real time too —
   // a shake frozen into a static skew would kill the whole point of the freeze.
   cameraShake.update(dtReal, realTime);
   cameraShake.getOffset(shakeOffset);
   camera.position.add(shakeOffset);
-  composer.render();
+  postfx.render();
   camera.position.sub(shakeOffset);
   requestAnimationFrame(frame);
 }
