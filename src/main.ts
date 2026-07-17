@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { createPostFX } from "./postfx";
+import { createSky, HORIZON_COLOR } from "./sky";
 import { buildTerrain, terrainHeight, carveCrater, waterTime } from "./terrain";
 import { populateFlora } from "./flora";
 import { createHerd } from "./unicorn";
@@ -85,11 +86,12 @@ window.addEventListener("keydown", (e) => {
 });
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xfbe0ef);
-// Thin exponential haze tinted to the sky's horizon: the meadow + midground
-// stay crisp and the destruction reads clearly; only the far terrain edge
-// dissolves softly into the sky colour.
-scene.fog = new THREE.FogExp2(0xf3dcec, 0.0016);
+// Background + fog are unified to the sky's horizon colour (sky.ts) so the far
+// terrain edge dissolves seamlessly into the skyline. Thin exponential haze: the
+// meadow + midground stay crisp and the destruction reads clearly; only the far
+// terrain edge softens into the sky.
+scene.background = new THREE.Color(HORIZON_COLOR);
+scene.fog = new THREE.FogExp2(HORIZON_COLOR, 0.0016);
 
 const camera = new THREE.PerspectiveCamera(
   55,
@@ -186,47 +188,18 @@ function clampCameraAboveGround(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Sky dome (pastel gradient)
+// Sky dome (pastel 3-stop gradient + false sun) and image-based lighting.
+// createSky returns whether IBL (a PMREM env from the dome) was applied; if it
+// was, the sky now contributes ambient energy, so the analytic fill lights below
+// are trimmed to keep the exposure and shadow contrast where they were.
 // ---------------------------------------------------------------------------
-const sky = new THREE.Mesh(
-  new THREE.SphereGeometry(800, 32, 16),
-  new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
-    uniforms: {
-      top: { value: new THREE.Color(0x7ec4ff) },
-      bottom: { value: new THREE.Color(0xffd9ec) },
-      offset: { value: 120 },
-      exponent: { value: 0.7 },
-    },
-    vertexShader: /* glsl */ `
-      varying vec3 vWorld;
-      void main() {
-        vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      uniform vec3 top;
-      uniform vec3 bottom;
-      uniform float offset;
-      uniform float exponent;
-      varying vec3 vWorld;
-      void main() {
-        float h = normalize(vWorld + vec3(0.0, offset, 0.0)).y;
-        float t = pow(max(h, 0.0), exponent);
-        gl_FragColor = vec4(mix(bottom, top, t), 1.0);
-      }
-    `,
-  }),
-);
-scene.add(sky);
+const skyIBL = createSky(scene, renderer);
 
 // ---------------------------------------------------------------------------
 // Lights
 // ---------------------------------------------------------------------------
-scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x6f9248, 0.9));
-scene.add(new THREE.AmbientLight(0xffffff, 0.22));
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x6f9248, skyIBL ? 0.7 : 0.9));
+scene.add(new THREE.AmbientLight(0xffffff, skyIBL ? 0.1 : 0.22));
 
 const sun = new THREE.DirectionalLight(0xfff1d0, 2.4);
 sun.position.set(70, 120, 50);
