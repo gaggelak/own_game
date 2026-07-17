@@ -48,12 +48,32 @@ const ANCHOR_DIST = 14; // world units along that ray from the camera
 // Trajectory preview. PREVIEW_STEP must equal the physics timestep (physics.ts)
 // — the march integrates exactly like Rapier so the drawn arc IS the flight.
 const PREVIEW_STEP = 1 / 60;
-const MAX_PREVIEW_STEPS = 240; // 4 s of flight; max real flight at MAX_V ≈ 3.7 s
+const MAX_PREVIEW_STEPS = 400; // 6.7 s of flight — covers a full slingshot lob
 const ARC_DOT_SPACING = 2.0; // world units between arc dots
-const MAX_ARC_DOTS = 96;
+const MAX_ARC_DOTS = 224; // a 65° lob's arc length, at the spacing above
 const ARC_FLOW_SPEED = 10; // u/s of dot-flow phase toward the landing point
 const RING_DOTS = 48;
 const RING_LIFT = 0.3; // ring dots hover this far above the terrain
+const HOVER_DOTS = 16; // small aim marker under the cursor between gestures
+const HOVER_R = 1.5;
+
+// ---- Throw styles (T cycles) — three models to A/B/C the feel --------------
+// charge    — hold = force (distance + radius), the cursor aims live.
+// slingshot — press LOCKS the ring where the cursor was; dragging DOWN flattens
+//             and speeds the arc, dragging UP lobs it (drag OFFSET, not flick
+//             velocity: visible, stable, reversible). Hold time = blast radius.
+// hurl      — the cursor IS the landing point, live until release; flight time
+//             is short and near-constant so every throw SLAMS down where you
+//             point. Hold time = blast radius.
+export type ThrowMode = "charge" | "slingshot" | "hurl";
+const THROW_MODES: ThrowMode[] = ["charge", "slingshot", "hurl"];
+const SLING_DRAG_PX = 220; // pixels of drag for a full flat/lob deflection
+const SLING_ANGLE_NEUTRAL = 42;
+const SLING_ANGLE_FLAT = 20; // full down-drag: fast and flat
+const SLING_ANGLE_LOB = 65; // full up-drag: slow mortar lob
+const HURL_AVG_SPEED = 95; // u/s of horizontal travel — sets the slam's pace
+const HURL_T_MIN = 0.38; // s: close slams arrive almost instantly
+const HURL_T_MAX = 1.05; // s: even cross-meadow slams stay quick
 
 // Blast radius grows mostly with charge, a little with impact speed.
 const BASE_RADIUS = 7;
@@ -87,6 +107,9 @@ export interface MeteorSystem {
   update(dt: number, time: number, dtReal: number): void;
   setWeapon(kind: WeaponKind): void;
   getWeapon(): WeaponKind;
+  /** Cancels any charge in progress, advances to the next style, returns it. */
+  cycleThrowMode(): ThrowMode;
+  getThrowMode(): ThrowMode;
   dispose(): void;
 }
 
@@ -294,6 +317,32 @@ const _hit = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 const _trailC = new THREE.Color(); // scratch; per-weapon trail colours live in WEAPONS
+
+// Slingshot solve: the launch speed that carries `start` through `target` at
+// `angleDeg`. Deliberately UNCAPPED — a silent speed cap would land short of
+// the locked ring; the caller keeps angles solvable instead. False only when
+// the target sits too far above the start for this angle.
+function solveAtAngle(
+  start: THREE.Vector3,
+  target: THREE.Vector3,
+  angleDeg: number,
+  out: THREE.Vector3,
+): boolean {
+  const dx = target.x - start.x;
+  const dz = target.z - start.z;
+  const R = Math.hypot(dx, dz);
+  if (R < 1e-3) return false;
+  const h = target.y - start.y;
+  const th = angleDeg * DEG;
+  const c = Math.cos(th);
+  const denom = 2 * c * c * (R * Math.tan(th) - h);
+  if (denom <= 0) return false;
+  const v = Math.sqrt((G * R * R) / denom);
+  if (!isFinite(v) || v <= 0) return false;
+  const inv = 1 / R;
+  out.set(dx * inv * v * c, v * Math.sin(th), dz * inv * v * c);
+  return true;
+}
 
 export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem> {
   const { scene, camera, controls, physics, domElement, onImpact } = opts;
@@ -662,11 +711,21 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   const previewRingPos = (previewRing.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
   const previewArcMat = previewArc.material as THREE.PointsMaterial;
   const previewRingMat = previewRing.material as THREE.PointsMaterial;
+  // Small aim marker under the cursor between gestures — marks the aim point,
+  // never claims a blast size (that promise belongs to the charging ring).
+  const hoverMarker = buildPreviewPoints(HOVER_DOTS, 0.7);
+  const hoverPos = (hoverMarker.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+  const hoverMat = hoverMarker.material as THREE.PointsMaterial;
+  hoverMat.opacity = 0.55;
 
   // Force meter (bottom-centre bar in index.html). Owned here rather than by
   // hud.ts: it's 60 Hz input-gesture state, not score presentation.
   const forceMeter = document.getElementById("force-meter");
   const forceFill = document.getElementById("force-fill");
+  const modeEl = document.getElementById("throw-mode");
+  function refreshModeLabel(): void {
+    if (modeEl) modeEl.textContent = `THROW STYLE — ${throwMode.toUpperCase()}  [T]`;
+  }
 
   // ---- gesture state --------------------------------------------------------
   let charging: Orb | null = null;
@@ -676,7 +735,29 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   let realClock = 0; // real-time clock so the arc's dot-flow never hitstop-freezes
   let lastCursorX = 0;
   let lastCursorY = 0;
+  let cursorSeen = false; // any pointermove yet — gates the hover marker
   let throwValid = false; // computeThrow has run for the current gesture
+  let throwMode: ThrowMode = "charge";
+  let downCursorY = 0; // press position — the slingshot drag is measured from here
+  const lockedTarget = new THREE.Vector3(); // slingshot: ring locked at press
+  let lockedValid = false;
+  const lastGround = new THREE.Vector3(); // last cursor ground point that resolved
+  let lastGroundValid = false;
+
+  // Cursor → ground point, remembering the last good one so a sky-aim frame
+  // doesn't blank the target (hurl keeps slamming at the meadow's edge).
+  function aimPoint(cx: number, cy: number, out: THREE.Vector3): boolean {
+    if (groundUnder(cx, cy, out)) {
+      lastGround.copy(out);
+      lastGroundValid = true;
+      return true;
+    }
+    if (lastGroundValid) {
+      out.copy(lastGround);
+      return true;
+    }
+    return false;
+  }
 
   // The orb's held slot: a fixed camera-relative anchor, lifted above terrain.
   // Re-evaluated every charging frame so WASD/zoom keeps the orb glued to it.
@@ -688,14 +769,47 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (out.y < gh + LIFT_MIN) out.y = gh + LIFT_MIN;
   }
 
-  // The ONE deterministic throw solve, shared by preview and launch: azimuth
-  // from the anchor toward the ground point under the cursor, speed from the
-  // force meter, fixed launch angle. Writes `throwVel`. When the cursor gives
-  // no usable direction (sky, or dead over the orb) the last one holds.
+  // The ONE deterministic throw solve, shared by preview and launch. Writes
+  // `throwVel` per the active throw style; every style ends in a velocity the
+  // same march + physics fly identically. In charge mode (and as the last-
+  // resort fallback) the cursor gives a DIRECTION; when it can't (sky, dead
+  // over the orb) the last direction holds.
   const throwVel = new THREE.Vector3();
   const lastDir = new THREE.Vector3();
   let lastDirValid = false;
   function computeThrow(force: number, cx: number, cy: number, anchor: THREE.Vector3): void {
+    if (throwMode === "slingshot" && lockedValid) {
+      // Drag OFFSET from the press point shapes the arc: down = flat + fast,
+      // up = mortar lob, neutral = the standard 42°. Offset, not velocity —
+      // visible, stable and reversible right up to release.
+      const k = THREE.MathUtils.clamp((cy - downCursorY) / SLING_DRAG_PX, -1, 1);
+      let angle =
+        k >= 0
+          ? SLING_ANGLE_NEUTRAL + (SLING_ANGLE_FLAT - SLING_ANGLE_NEUTRAL) * k
+          : SLING_ANGLE_NEUTRAL + (SLING_ANGLE_LOB - SLING_ANGLE_NEUTRAL) * -k;
+      // Solve to the DETONATION altitude (underside 0.2 above ground = centre
+      // ORB_R + 0.2 up), not the ground: a flat arc reaches that height well
+      // before the ground point, so aiming at the surface would land it short.
+      _tmp.copy(lockedTarget);
+      _tmp.y += ORB_R + 0.2;
+      // A hilltop target can sit above the anchor: steepen until it solves.
+      for (; angle <= 82; angle += 8) {
+        if (solveAtAngle(anchor, _tmp, angle, throwVel)) return;
+      }
+      // Pathological (target essentially on top of the orb) — fall through.
+    } else if (throwMode === "hurl" && aimPoint(cx, cy, _aim)) {
+      // The cursor is the landing point; flight time is short and near-constant
+      // so every throw slams down. Solving v = Δ/T (+ gravity make-up) always
+      // succeeds — no unreachable targets, no speed cap, no lies.
+      const dx = _aim.x - anchor.x;
+      const dy = _aim.y + (ORB_R + 0.2) - anchor.y; // detonation altitude, as above
+      const dz = _aim.z - anchor.z;
+      const T = THREE.MathUtils.clamp(Math.hypot(dx, dz) / HURL_AVG_SPEED, HURL_T_MIN, HURL_T_MAX);
+      throwVel.set(dx / T, dy / T + 0.5 * G * T, dz / T);
+      return;
+    }
+
+    // Charge mode, and the fallback for the styles above.
     if (!lastDirValid) {
       // First aim ever: seed with the camera's forward azimuth.
       const e = camera.matrixWorld.elements;
@@ -841,6 +955,10 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     throwValid = false;
     lastCursorX = e.clientX;
     lastCursorY = e.clientY;
+    downCursorY = e.clientY;
+    // Slingshot: the ring locks HERE; the mouse now shapes the arc instead.
+    lockedValid = throwMode === "slingshot" && aimPoint(e.clientX, e.clientY, lockedTarget);
+    hoverMarker.visible = false;
 
     anchorPos(_hit);
     orb.group.position.copy(_hit);
@@ -868,10 +986,11 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   }
 
   function onMove(e: PointerEvent): void {
-    if (!charging || e.pointerId !== pointerId) return;
-    // The orb no longer follows the cursor — the cursor is the aim.
+    // Track the cursor at all times: the hover marker + the slingshot lock read
+    // it between gestures, the live aim reads it during one.
     lastCursorX = e.clientX;
     lastCursorY = e.clientY;
+    cursorSeen = true;
   }
 
   // When MAX_FLYING meteors are already airborne, detonate the oldest on the
@@ -996,6 +1115,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (charging) endGesture(false);
   }
 
+  refreshModeLabel();
   domElement.addEventListener("pointerdown", onDown, true);
   domElement.addEventListener("pointermove", onMove, true);
   domElement.addEventListener("pointerup", onUp, true);
@@ -1074,6 +1194,24 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         updatePreview();
       }
 
+      // Aim marker between gestures: a small slowly-spinning dotted ring under
+      // the cursor, tinted for the weapon you'd conjure. Marks aim, not blast.
+      if (!charging && cursorSeen && aimPoint(lastCursorX, lastCursorY, _tmp)) {
+        hoverMat.color.setHex(WEAPONS[currentWeapon].previewColor);
+        for (let i = 0; i < HOVER_DOTS; i++) {
+          const a = (i / HOVER_DOTS) * Math.PI * 2 + realClock * 0.8;
+          const x = _tmp.x + Math.cos(a) * HOVER_R;
+          const z = _tmp.z + Math.sin(a) * HOVER_R;
+          hoverPos[i * 3] = x;
+          hoverPos[i * 3 + 1] = terrainHeight(x, z) + RING_LIFT;
+          hoverPos[i * 3 + 2] = z;
+        }
+        (hoverMarker.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+        hoverMarker.visible = true;
+      } else if (charging) {
+        hoverMarker.visible = false;
+      }
+
       for (let i = flying.length - 1; i >= 0; i--) {
         const rec = flying[i];
         const p = rec.handle.body.translation();
@@ -1114,17 +1252,29 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     getWeapon(): WeaponKind {
       return currentWeapon;
     },
+    cycleThrowMode(): ThrowMode {
+      endGesture(false); // never carry a half-charged orb across styles
+      throwMode = THROW_MODES[(THROW_MODES.indexOf(throwMode) + 1) % THROW_MODES.length];
+      lockedValid = false;
+      refreshModeLabel();
+      return throwMode;
+    },
+    getThrowMode(): ThrowMode {
+      return throwMode;
+    },
     dispose(): void {
       domElement.removeEventListener("pointerdown", onDown, true);
       domElement.removeEventListener("pointermove", onMove, true);
       domElement.removeEventListener("pointerup", onUp, true);
       domElement.removeEventListener("pointercancel", onCancel, true);
       window.removeEventListener("blur", onBlur);
-      scene.remove(previewArc, previewRing);
+      scene.remove(previewArc, previewRing, hoverMarker);
       previewArc.geometry.dispose();
       previewRing.geometry.dispose();
+      hoverMarker.geometry.dispose();
       previewArcMat.dispose();
       previewRingMat.dispose();
+      hoverMat.dispose();
       if (forceMeter) forceMeter.classList.remove("show", "water");
     },
   };

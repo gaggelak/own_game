@@ -492,6 +492,7 @@ weaponWaterBtn.addEventListener("click", () => setWeapon("waterball"));
 window.addEventListener("keydown", (e) => {
   if (e.key === "1") setWeapon("meteor");
   else if (e.key === "2") setWeapon("waterball");
+  else if (e.key === "t" || e.key === "T") meteors.cycleThrowMode();
 });
 
 // ---------------------------------------------------------------------------

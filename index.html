@@ -318,6 +318,22 @@
         }
       }
 
+      /* ---- Throw style label (above the force meter) --------------------- */
+      #throw-mode {
+        position: fixed;
+        bottom: 100px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 4;
+        font: 600 11px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        letter-spacing: 1.2px;
+        color: #e9d8f4;
+        opacity: 0.75;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+        pointer-events: none;
+        user-select: none;
+      }
+
       /* ---- Force meter (bottom center, shown while charging) ------------- */
       /* Width is driven per-frame from meteor.ts (the charge), so no transition. */
       #force-meter {
@@ -493,7 +509,8 @@
       <span id="count">🦄 × 14</span>
       <br />
       WASD/QE — fly (shift = fast) · hold — charge · aim — mouse · release —
-      fire · right-drag — orbit · scroll — zoom · 1/2 — weapon · M — mute
+      fire · right-drag — orbit · scroll — zoom · 1/2 — weapon · T — throw
+      style · M — mute
     </div>
 
     <div id="weapons">
@@ -515,6 +532,7 @@
 
     <div id="timer" class="hidden">0:00</div>
 
+    <div id="throw-mode"></div>
     <div id="force-meter"><div id="force-fill"></div></div>
 
     <div id="banner">
