@@ -17,6 +17,7 @@ import { CameraShake } from "./shake";
 import { createAmbience } from "./ambience";
 import { createScore } from "./score";
 import { createHud } from "./hud";
+import { createPerks } from "./perks";
 import { createGame } from "./game";
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,9 @@ const sfx = createSfx();
 // Score keeps the numbers + the chain; hud owns every pixel of run feedback.
 const score = createScore();
 const hud = createHud();
+// Roguelite layer (Fase 4): XP, level-ups + run-scoped perks. Pure state; its
+// modifiers are pushed to the systems by applyPerkMods() below.
+const perks = createPerks();
 audio.play("menu");
 // Start the menu theme on open. The native app enables WebView2 autoplay (see
 // additionalBrowserArgs in tauri.conf.json), so this eager unlock plays the music
@@ -71,7 +75,8 @@ function leaveMenu(): void {
 document.getElementById("play-btn")!.addEventListener("click", () => {
   if (started) return;
   leaveMenu();
-  game.startRun();
+  game.startRun(); // arms perks.beginRun() internally
+  applyPerkMods(); // reset every system to identity for the fresh run
 });
 document.getElementById("zen-btn")!.addEventListener("click", () => {
   if (started) return;
@@ -271,6 +276,9 @@ const ELECTRO_POP_RADIUS = 9; // blast size when an electrified unicorn finally 
 // payoff. Smaller than the pop's own blast so a cascade needs real clustering.
 const CHAIN_RADIUS = 7;
 const SCARE_FACTOR = 2.5; // panic reaches well beyond the kill radius
+// Domino perk (Fase 4): a meteor kill electrifies the survivor ring this far
+// beyond the crater; they convulse, then pop + cascade like a seeded water ball.
+const DOMINO_RING = 6;
 
 // Hitstop: a big multi-kill freezes the simulation for a beat so the blast
 // lands like a punch. The camera + HUD keep running on real time through it —
@@ -422,6 +430,15 @@ function handleImpact(
         sfx,
       );
       game.addTimeForKills(killed.length);
+      perks.addKills(killed.length); // XP (no-op unless a PLAY run is active)
+    }
+    // Domino perk: a meteor kill electrifies the survivor ring just outside the
+    // crater. They convulse, then burst a beat later (scored DOMINO) and cascade
+    // on their own via the frame loop's CHAIN_RADIUS. chainDepth 1 ⇒ DOMINO ×2.
+    if (perks.mods().domino && killed.length) {
+      const seeded = herd.electrocuteAt(point, radius + DOMINO_RING, 1);
+      for (const p of seeded) electro.zap(point, _zapTo.set(p.x, p.y + 1.5, p.z));
+      if (seeded.length) sfx.scream(seeded.length);
     }
     if (killed.length >= HITSTOP_KILLS) triggerHitstop(killed.length);
   }
@@ -488,8 +505,48 @@ hud.setCount(herd.aliveCount());
 
 // The run: PLAY wipes this backdrop herd and starts the level gauntlet; ZEN
 // adopts it as-is and just keeps the meadow stocked from here on.
-const game = createGame({ herd, hud, score, audio, sfx });
+const game = createGame({ herd, hud, score, perks, audio, sfx });
 hud.setMenuStats(score.lifetime());
+
+// ---------------------------------------------------------------------------
+// Roguelite level-ups (Fase 4). perks.ts owns the pure state; applyPerkMods
+// pushes the active modifier snapshot out to the systems; the frame loop freezes
+// the sim (`paused`) while a card screen is up, exactly like a hitstop but full.
+// ---------------------------------------------------------------------------
+let paused = false;
+
+function applyPerkMods(): void {
+  const m = perks.mods();
+  herd.setSizeMult(m.sizeMult);
+  herd.setSpeedMult(m.speedMult);
+  herd.setHornGlow(m.hornGlow);
+  meteors.setRadiusScale(m.radiusScale);
+  meteors.setChargeScale(m.chargeScale);
+  score.setStreakWindowBonus(m.streakBonusSec);
+  // m.waveMult (game.levelConfig) and m.domino (handleImpact) are pulled at their
+  // use-sites rather than pushed.
+}
+
+// Show one card screen per queued level-up, draining them one at a time so a
+// huge multi-kill that crossed several thresholds resolves as a sequence.
+function presentPerkChoices(): void {
+  hud.showPerkChoices(perks.roll(), (id) => {
+    perks.choose(id);
+    applyPerkMods();
+    if (perks.pendingLevelUps() > 0) presentPerkChoices();
+    else {
+      hud.hidePerkChoices();
+      paused = false;
+    }
+  });
+}
+
+function openPerkSelect(): void {
+  if (paused) return;
+  paused = true;
+  meteors.cancelCharge(); // an in-flight charge can't launch behind the overlay
+  presentPerkChoices();
+}
 
 // Dev-only console handle: staging a blast at an exact point is the only way to
 // line up a specific multi-kill on cue — real aiming is far too fiddly to test
@@ -546,6 +603,20 @@ if (import.meta.env.DEV) {
     game,
     hud,
     sfx,
+    perks,
+    /** Grant XP directly; crossing a level threshold queues a card screen. */
+    addXp(n = 1) {
+      perks.addKills(n);
+    },
+    /** Fill the current level and open the card screen now (bypasses the
+     *  state==="playing" gate the frame loop applies). */
+    forceLevelUp() {
+      perks.addKills(perks.xpForNext() - perks.xpInLevel());
+      openPerkSelect();
+    },
+    openPerkSelect,
+    applyPerkMods,
+    isPaused: () => paused,
     // The Browser pane runs hidden (rAF paused), so tests drive the sim by hand:
     // step physics + meteors manually, read the camera/controls band directly.
     meteors,
@@ -600,7 +671,10 @@ function frame(): void {
   realTime += dtReal;
   // Hitstop burns down on REAL time, so a freeze can never wedge the game.
   hitstopLeft = Math.max(0, hitstopLeft - dtReal);
-  const dt = dtReal * (hitstopLeft > 0 ? HITSTOP_SCALE : 1);
+  // A perk-select screen fully freezes the sim (dt = 0); the real-time block
+  // below still runs so the overlay, camera + pops stay live — like a hitstop
+  // that never expires until you pick.
+  const dt = paused ? 0 : dtReal * (hitstopLeft > 0 ? HITSTOP_SCALE : 1);
   simTime += dt;
   const t = simTime;
 
@@ -611,7 +685,9 @@ function frame(): void {
 
   // The clock, the waves, the level transitions. On sim time, so the freeze the
   // player sees matches the countdown they're racing (PHOTO FINISH stays honest).
-  game.update(dt);
+  // Skipped entirely while paused: some transitions (empty herd → level clear)
+  // don't depend on dt, so a bare dt=0 wouldn't hold them.
+  if (!paused) game.update(dt);
 
   // Combat cools off: after a calm stretch with no new attacks, drift the
   // frenzy theme back down to the peaceful meadow ambience.
@@ -652,6 +728,7 @@ function frame(): void {
     }
     if (chained) sfx.scream(chained);
     sfx.electro(ELECTRO_POP_RADIUS, true);
+    perks.addKills(exploded.length); // each pop is a kill → XP (no-op outside a run)
     refreshHerd();
   }
   // Crackle arcs over every unicorn still standing electrified + drive the soft
@@ -664,6 +741,12 @@ function frame(): void {
   // Sim dt flies the orbs; real dt drives the charge gesture (meter + arc must
   // stay smooth through a hitstop freeze).
   meteors.update(dt, t, dtReal);
+
+  // A kill this frame (electro pops above, meteor kills inside meteors.update)
+  // may have crossed an XP threshold — pop the perk screen, which freezes the
+  // sim from next frame. Only mid-level; other states defer the queued level-up.
+  if (!paused && perks.pendingLevelUps() > 0 && game.state() === "playing") openPerkSelect();
+
   vfx.update(dt, t);
   electro.update(dt, t);
   gibs.update(dt);
@@ -683,6 +766,7 @@ function frame(): void {
   hud.setChain(chain.mult, chain.remaining01);
   hud.setStreak(score.streakState());
   hud.setScore(score.current().score);
+  hud.setXp(perks.level(), perks.progress01()); // roguelite XP bar (hidden outside a run)
   hud.update(dtReal, camera);
 
   // Drive the colour grade (hitstop desat, combo vibrance, impact pulses) and

@@ -584,6 +584,91 @@
         color: #ff9ad1;
         text-shadow: 0 0 16px rgba(255, 90, 180, 0.95), 0 2px 4px rgba(0, 0, 0, 0.6);
       }
+
+      /* ---- XP bar (bottom edge) + level label --------------------------- */
+      #xp-bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 4;
+        height: 10px;
+        background: rgba(24, 16, 38, 0.5);
+        border-top: 1px solid rgba(255, 255, 255, 0.16);
+        overflow: hidden;
+        pointer-events: none;
+        user-select: none;
+      }
+      #xp-bar.hidden,
+      #xp-level.hidden {
+        display: none;
+      }
+      /* Width is driven per-frame from hud.ts (XP accrual), so no transition. */
+      #xp-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #8fd3ff, #c6a8ff);
+        box-shadow: 0 0 10px rgba(150, 190, 255, 0.7);
+      }
+      #xp-level {
+        position: fixed;
+        left: 12px;
+        bottom: 14px;
+        z-index: 4;
+        font: 800 13px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        letter-spacing: 1px;
+        color: #c6a8ff;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+        pointer-events: none;
+        user-select: none;
+      }
+
+      /* ---- Perk select (level-up) --------------------------------------- */
+      /* A BLOCKING overlay (unlike .overlay--pass): it swallows canvas pointer
+         events so no throw can fire while you choose. Above menu/endcard (z 10). */
+      #perk-overlay {
+        z-index: 11;
+        flex-direction: column;
+        background: rgba(10, 8, 20, 0.55);
+        backdrop-filter: blur(3px);
+      }
+      #perk-heading {
+        margin: 0 0 22px;
+        font: 800 26px/1 "Segoe UI", system-ui, sans-serif;
+        letter-spacing: 1px;
+        text-align: center;
+        background: linear-gradient(90deg, #8fd3ff, #c6a8ff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 2px 12px rgba(0, 0, 0, 0.5));
+      }
+      #perk-cards {
+        display: flex;
+        gap: 18px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      #perk-cards .card {
+        width: 240px;
+        padding: 28px 24px;
+        cursor: pointer;
+        pointer-events: auto;
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      #perk-cards .card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 24px 60px rgba(150, 120, 255, 0.4);
+      }
+      #perk-cards .card h1 {
+        font-size: 24px;
+        margin: 0 0 10px;
+      }
+      #perk-cards .card p {
+        font-size: 14px;
+        margin: 0;
+        opacity: 0.9;
+      }
     </style>
   </head>
   <body>
@@ -629,6 +714,9 @@
 
     <div id="pops"></div>
 
+    <div id="xp-bar" class="hidden"><div id="xp-fill"></div></div>
+    <div id="xp-level" class="hidden">LV 1</div>
+
     <div id="menu" class="overlay">
       <div class="card">
         <h1>🦄 Unicorn Meadow</h1>
@@ -652,6 +740,13 @@
           <div id="endcard-title"></div>
         </div>
         <button id="endcard-replay">Play again</button>
+      </div>
+    </div>
+
+    <div id="perk-overlay" class="overlay hidden">
+      <div id="perk-panel">
+        <h2 id="perk-heading">LEVEL UP — CHOOSE A PERK</h2>
+        <div id="perk-cards"></div>
       </div>
     </div>
 

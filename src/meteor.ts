@@ -84,6 +84,12 @@ export interface MeteorSystem {
   update(dt: number, time: number, dtReal: number): void;
   setWeapon(kind: WeaponKind): void;
   getWeapon(): WeaponKind;
+  /** Perk hooks (Fase 4). radiusScale > 1 = bigger blast; chargeScale < 1 = faster. */
+  setRadiusScale(scale: number): void;
+  setChargeScale(scale: number): void;
+  /** Abort any in-flight charge (parks the orb, hides the meter) — e.g. when the
+   *  level-up overlay opens so a held throw can't fire behind it. */
+  cancelCharge(): void;
   dispose(): void;
 }
 
@@ -684,6 +690,11 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   const lastGround = new THREE.Vector3(); // last cursor ground point that resolved
   let lastGroundValid = false;
 
+  // Run-scoped perk scalers (Fase 4), pushed in via setRadiusScale/setChargeScale.
+  // chargeScale < 1 = faster charge; radiusScale > 1 = bigger blast. 1 = no perk.
+  let radiusScale = 1;
+  let chargeScale = 1;
+
   // Cursor → ground point, remembering the last good one so a sky-aim frame
   // doesn't blank the target (hurl keeps slamming at the meadow's edge).
   function aimPoint(cx: number, cy: number, out: THREE.Vector3): boolean {
@@ -786,7 +797,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   // once from onDown, so a same-frame tap always has a valid throwVel.
   function updatePreview(): void {
     if (!charging) return;
-    const force = THREE.MathUtils.clamp(holdTime / CHARGE_TIME, MIN_FORCE, 1);
+    const force = THREE.MathUtils.clamp(holdTime / (CHARGE_TIME * chargeScale), MIN_FORCE, 1);
     computeThrow(lastCursorX, lastCursorY, charging.group.position);
     throwValid = true;
 
@@ -796,11 +807,12 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
     // Landing ring, sized by the EXACT radius formula the detonation uses —
     // the ring is a promise, not an estimate.
-    const radius = THREE.MathUtils.clamp(
-      BASE_RADIUS + force * CHARGE_RADIUS + _landV * RADIUS_PER_SPEED,
-      RADIUS_MIN,
-      RADIUS_MAX,
-    );
+    const radius =
+      THREE.MathUtils.clamp(
+        BASE_RADIUS + force * CHARGE_RADIUS + _landV * RADIUS_PER_SPEED,
+        RADIUS_MIN,
+        RADIUS_MAX,
+      ) * radiusScale;
     for (let i = 0; i < RING_DOTS; i++) {
       const a = (i / RING_DOTS) * Math.PI * 2;
       const x = _land.x + Math.cos(a) * radius;
@@ -908,11 +920,12 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const p = rec.handle.body.translation();
     const v = rec.handle.body.linvel();
     _tmp.set(v.x, v.y, v.z);
-    const radius = THREE.MathUtils.clamp(
-      BASE_RADIUS + rec.charge * CHARGE_RADIUS + _tmp.length() * RADIUS_PER_SPEED,
-      RADIUS_MIN,
-      RADIUS_MAX,
-    );
+    const radius =
+      THREE.MathUtils.clamp(
+        BASE_RADIUS + rec.charge * CHARGE_RADIUS + _tmp.length() * RADIUS_PER_SPEED,
+        RADIUS_MIN,
+        RADIUS_MAX,
+      ) * radiusScale;
     _hit.set(p.x, terrainHeight(p.x, p.z), p.z);
     onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
       charge: rec.charge,
@@ -926,7 +939,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const spawn = orb.group.position;
     // charge == force: the same floored 0..1 that sized the preview, so
     // ImpactInfo.charge keeps its meaning for the scorer.
-    const charge = THREE.MathUtils.clamp(holdTime / CHARGE_TIME, MIN_FORCE, 1);
+    const charge = THREE.MathUtils.clamp(holdTime / (CHARGE_TIME * chargeScale), MIN_FORCE, 1);
     // throwVel is the arc the player was just shown (updatePreview runs every
     // charging frame, and once in onDown) — fire THAT, not a re-solve, so the
     // landing ring is honoured. The re-solve here is unreachable insurance.
@@ -1053,7 +1066,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         // freezes the sim. (Orbs in FLIGHT stay on sim dt below — they're physics.)
         holdTime += dtReal;
         anchorPos(charging.group.position); // stay glued to the slot through WASD/zoom
-        const k = Math.min(holdTime / CHARGE_TIME, 1);
+        const k = Math.min(holdTime / (CHARGE_TIME * chargeScale), 1);
         const pulse = 0.85 + 0.15 * Math.sin(holdTime * 18);
         charging.coreGlow.value = (0.9 + k * 1.3) * pulse;
         charging.haloMat.opacity = (0.06 + k * 0.12) * pulse;
@@ -1136,11 +1149,12 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
           const v = rec.handle.body.linvel();
           _tmp.set(v.x, v.y, v.z);
           const speed = _tmp.length();
-          const radius = THREE.MathUtils.clamp(
-            BASE_RADIUS + rec.charge * CHARGE_RADIUS + speed * RADIUS_PER_SPEED,
-            RADIUS_MIN,
-            RADIUS_MAX,
-          );
+          const radius =
+            THREE.MathUtils.clamp(
+              BASE_RADIUS + rec.charge * CHARGE_RADIUS + speed * RADIUS_PER_SPEED,
+              RADIUS_MIN,
+              RADIUS_MAX,
+            ) * radiusScale;
           _hit.set(p.x, groundY, p.z);
           onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
             charge: rec.charge,
@@ -1155,6 +1169,15 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     },
     getWeapon(): WeaponKind {
       return currentWeapon;
+    },
+    setRadiusScale(scale: number): void {
+      radiusScale = scale;
+    },
+    setChargeScale(scale: number): void {
+      chargeScale = scale;
+    },
+    cancelCharge(): void {
+      if (charging) endGesture(false);
     },
     dispose(): void {
       domElement.removeEventListener("pointerdown", onDown, true);

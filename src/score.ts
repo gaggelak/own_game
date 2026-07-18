@@ -31,6 +31,9 @@ const OVERKILL_CHARGE = 0.95;
 const DOMINO_PTS = 75; // × chain depth, per contagion pop
 const STREAK_WINDOW = 5; // seconds after a kill before the streak banks (at tier 0)
 const STREAK_DECAY = 0.85; // window shrinks by this per ladder rung climbed
+// Perk-granted extra streak seconds (Fase 4: "longer streak window"), added to
+// STREAK_WINDOW before the per-rung decay. 0 = no perk.
+let streakWindowBonus = 0;
 
 // Cross-throw kill-streak ladder. tier drives HUD styling + the fanfare's
 // pitch; min is now the streak count (kills across throws), not same-blast n.
@@ -143,6 +146,8 @@ export interface Score {
   addBonus(points: number): void;
   /** Advance the chain + streak windows on the sim clock; emits bank events. */
   update(now: number): ScoreEvent[];
+  /** Perk hook (Fase 4): extra seconds added to the streak window. */
+  setStreakWindowBonus(sec: number): void;
   chainState(): ChainState;
   streakState(): StreakState;
   current(): { score: number; kills: number; bestChain: number; biggestBlast: number };
@@ -197,7 +202,7 @@ function nextRungFor(n: number): Rung | null {
 // The streak window shrinks a notch per rung climbed, so higher streaks demand
 // faster follow-ups — the escalating pressure the playtester asked for.
 function streakWindow(n: number): number {
-  return STREAK_WINDOW * Math.pow(STREAK_DECAY, rungFor(n)?.tier ?? 0);
+  return (STREAK_WINDOW + streakWindowBonus) * Math.pow(STREAK_DECAY, rungFor(n)?.tier ?? 0);
 }
 
 export function createScore(): Score {
@@ -380,6 +385,10 @@ export function createScore(): Score {
       return out;
     },
 
+    setStreakWindowBonus(sec: number): void {
+      streakWindowBonus = sec;
+    },
+
     chainState(): ChainState {
       if (chainEnd < 0) return { mult, remaining01: 0 };
       const span = chainEnd - chainWindowStart || CHAIN_WINDOW;
@@ -388,7 +397,7 @@ export function createScore(): Score {
 
     streakState(): StreakState {
       if (streakEnd < 0) return { count: 0, tier: 0, remaining01: 0 };
-      const span = streakEnd - streakStart || STREAK_WINDOW;
+      const span = streakEnd - streakStart || STREAK_WINDOW + streakWindowBonus;
       return {
         count: streak,
         tier: rungFor(streak)?.tier ?? 0,
