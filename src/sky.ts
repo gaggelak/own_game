@@ -81,14 +81,17 @@ function buildDome(): THREE.Mesh {
             ? mix(uHorizon, uMid, t / MID)
             : mix(uMid, uZenith, (t - MID) / (1.0 - MID));
 
-          // Horizon haze: soften the skyline toward near-white right at y≈0.
+          // Horizon haze: a gentle skyline softening. Kept low so the band stays
+          // UNDER the bloom threshold — at higher mixes it tips over and blooms
+          // into a white wash across the top of the frame.
           float haze = exp(-abs(wdir.y) * 6.0);
-          col = mix(col, uHaze, haze * 0.45);
+          col = mix(col, uHaze, haze * 0.2);
 
           // False sun: tight warm lobe in the sun's azimuth, hugging the horizon.
+          // Subtle — just a warm hint, not a second light source.
           float azi = max(dot(normalize(vWorld.xz), uSunAzimuth), 0.0);
           float glow = pow(azi, 8.0) * exp(-abs(wdir.y) * 4.0);
-          col += uSunColor * glow * 0.32;
+          col += uSunColor * glow * 0.14;
 
           gl_FragColor = vec4(col, 1.0);
         }
@@ -115,7 +118,10 @@ export function createSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer): bo
     envScene.add(dome);
     const rt = pmrem.fromScene(envScene, 0, 1, 1200);
     scene.environment = rt.texture;
-    scene.environmentIntensity = 0.5; // gentle — the analytic lights still lead
+    // Low: the IBL is only meant to give water + horns a faint pastel sheen. At
+    // higher values it lays a shiny sky reflection over every surface (the rocks
+    // especially) and washes the whole scene out.
+    scene.environmentIntensity = 0.2;
     envScene.remove(dome);
     pmrem.dispose();
   }
