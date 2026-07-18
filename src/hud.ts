@@ -10,6 +10,7 @@
 
 import * as THREE from "three";
 import type { ScoreEvent, RunSummary, LifetimeStats, StreakState } from "./score";
+import type { PerkCard } from "./perks";
 import type { Sfx } from "./sfx";
 
 const POP_POOL = 24;
@@ -35,6 +36,13 @@ export interface Hud {
   setCount(n: number): void;
   /** null hides the clock entirely (menu / Zen). */
   setTimer(seconds: number | null): void;
+  /** Roguelite XP bar (Fase 4): current level + 0..1 progress into it. */
+  setXp(level: number, progress01: number): void;
+  showXp(show: boolean): void;
+  /** Level-up: show 3 perk cards; onPick fires with the chosen id, then the
+   *  caller decides whether to re-show (multi-level-up) or hide + resume. */
+  showPerkChoices(cards: PerkCard[], onPick: (id: PerkCard["id"]) => void): void;
+  hidePerkChoices(): void;
   /** Big centre kill-name. Higher tiers preempt; equal ones queue briefly. */
   banner(label: string, tier: number): void;
   /** The smaller line under it: skill shots, chain banks. */
@@ -68,6 +76,11 @@ export function createHud(): Hud {
   const streakLabel = document.getElementById("streak-label")!;
   const streakFill = document.getElementById("streak-fill")!;
   const popsEl = document.getElementById("pops")!;
+  const xpBar = document.getElementById("xp-bar")!;
+  const xpFill = document.getElementById("xp-fill")!;
+  const xpLevel = document.getElementById("xp-level")!;
+  const perkOverlay = document.getElementById("perk-overlay")!;
+  const perkCardsEl = document.getElementById("perk-cards")!;
   const menuStatsEl = document.getElementById("menu-stats")!;
   const endcardEl = document.getElementById("endcard")!;
   const endRankEl = document.getElementById("endcard-rank")!;
@@ -91,6 +104,8 @@ export function createHud(): Hud {
   let lastCount = -1;
   let lastTimerText = "";
   let lastMultText = "";
+  let lastXpWidth = "";
+  let lastXpLevel = -1;
 
   let bannerHold = 0; // seconds left before a same-or-lower tier may replace
   let bannerTier = 0;
@@ -193,6 +208,44 @@ export function createHud(): Hud {
         timerEl.textContent = text;
       }
       timerEl.classList.toggle("urgent", s <= 5);
+    },
+
+    setXp(level: number, progress01: number): void {
+      const w = `${(Math.min(Math.max(progress01, 0), 1) * 100).toFixed(1)}%`;
+      if (w !== lastXpWidth) {
+        lastXpWidth = w;
+        xpFill.style.width = w;
+      }
+      if (level !== lastXpLevel) {
+        lastXpLevel = level;
+        xpLevel.textContent = `LV ${level}`;
+      }
+    },
+
+    showXp(show: boolean): void {
+      xpBar.classList.toggle("hidden", !show);
+      xpLevel.classList.toggle("hidden", !show);
+    },
+
+    showPerkChoices(cards: PerkCard[], onPick: (id: PerkCard["id"]) => void): void {
+      perkCardsEl.innerHTML = ""; // drop any prior cards + their listeners
+      for (const c of cards) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h1");
+        h.textContent = c.title;
+        const p = document.createElement("p");
+        p.textContent = c.desc;
+        card.append(h, p);
+        card.addEventListener("click", () => onPick(c.id));
+        perkCardsEl.appendChild(card);
+      }
+      perkOverlay.classList.remove("hidden");
+    },
+
+    hidePerkChoices(): void {
+      perkOverlay.classList.add("hidden");
+      perkCardsEl.innerHTML = "";
     },
 
     banner,

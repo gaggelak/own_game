@@ -14,6 +14,7 @@
 import type { Herd } from "./unicorn";
 import type { Hud } from "./hud";
 import type { Score } from "./score";
+import type { Perks } from "./perks";
 import type { AudioManager } from "./audio";
 import type { Sfx } from "./sfx";
 
@@ -52,8 +53,14 @@ interface LevelCfg {
   scareRadiusMult: number;
 }
 
-function levelConfig(n: number): LevelCfg {
-  const count = Math.min(LEVEL_COUNT_BASE + LEVEL_COUNT_STEP * (n - 1), LEVEL_COUNT_MAX);
+function levelConfig(n: number, waveMult = 1): LevelCfg {
+  // The "more unicorns" perk scales the herd; since `time` derives from `count`
+  // below, the clock grows with the herd too — the perk adds spectacle, not a
+  // time squeeze. LEVEL_COUNT_MAX still caps the absolute size.
+  const count = Math.min(
+    Math.round((LEVEL_COUNT_BASE + LEVEL_COUNT_STEP * (n - 1)) * waveMult),
+    LEVEL_COUNT_MAX,
+  );
   return {
     count,
     time: Math.min(LEVEL_TIME_BASE + LEVEL_TIME_PER_UNICORN * count, LEVEL_TIME_MAX),
@@ -85,12 +92,13 @@ export interface GameDeps {
   herd: Herd;
   hud: Hud;
   score: Score;
+  perks: Perks;
   audio: AudioManager;
   sfx: Sfx;
 }
 
 export function createGame(deps: GameDeps): Game {
-  const { herd, hud, score, audio, sfx } = deps;
+  const { herd, hud, score, perks, audio, sfx } = deps;
 
   let state: GameState = "menu";
   let level = 0;
@@ -103,7 +111,7 @@ export function createGame(deps: GameDeps): Game {
 
   function beginIntro(n: number): void {
     level = n;
-    pending = levelConfig(n);
+    pending = levelConfig(n, perks.mods().waveMult);
     state = "levelIntro";
     stateT = INTRO_TIME;
     hud.setTimer(null);
@@ -112,7 +120,7 @@ export function createGame(deps: GameDeps): Game {
   }
 
   function beginPlaying(): void {
-    const cfg = pending ?? levelConfig(level);
+    const cfg = pending ?? levelConfig(level, perks.mods().waveMult);
     herd.spawnWave(cfg.count, {
       speedMult: cfg.speedMult,
       gallopFraction: cfg.gallopFraction,
@@ -146,6 +154,11 @@ export function createGame(deps: GameDeps): Game {
 
   function endRun(): void {
     state = "runOver";
+    // Disarm the roguelite layer: wipe XP/perk state, hide the bar, and clear any
+    // queued level-up so a card can never open over the end card.
+    perks.reset();
+    hud.showXp(false);
+    hud.hidePerkChoices();
     hud.setTimer(null);
     sfx.timeUp();
     hud.showEndCard(score.commitRun(levelsCleared), score.lifetime());
@@ -159,8 +172,10 @@ export function createGame(deps: GameDeps): Game {
     startRun(): void {
       herd.reset(); // clear the menu backdrop herd
       score.resetRun();
+      perks.beginRun(); // arm XP + perks (PLAY only; main pushes identity mods next)
       levelsCleared = 0;
       hud.showRunUi(true);
+      hud.showXp(true);
       beginIntro(1);
     },
 

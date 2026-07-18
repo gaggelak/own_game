@@ -168,6 +168,7 @@ type Gait = "walk" | "gallop";
 
 interface Unicorn {
   wrapper: THREE.Group;
+  inner: THREE.Group; // scaled model wrapper — rescaled live by the "bigger unicorns" perk
   model: THREE.Object3D;
   mesh: THREE.SkinnedMesh | null;
   mixer: THREE.AnimationMixer;
@@ -236,12 +237,14 @@ function fleeTarget(u: Unicorn, dx: number, dz: number): void {
 
 // Pin the world-space horn onto the forehead, following the animated head bone
 // and the body's current yaw. Shared by the roaming + convulsing update paths.
-function placeHorn(u: Unicorn, yaw: number): void {
+function placeHorn(u: Unicorn, yaw: number, sizeMult = 1): void {
   u.headBone.updateWorldMatrix(true, false);
   u.headBone.getWorldPosition(_v);
-  _v.x += Math.sin(yaw) * HORN_FWD;
-  _v.z += Math.cos(yaw) * HORN_FWD;
-  _v.y += HORN_UP;
+  // The head bone already rides the scaled `inner`; the fixed forehead offsets
+  // scale with it too so the horn stays seated on a bigger unicorn.
+  _v.x += Math.sin(yaw) * HORN_FWD * sizeMult;
+  _v.z += Math.cos(yaw) * HORN_FWD * sizeMult;
+  _v.y += HORN_UP * sizeMult;
   u.horn.position.copy(_v);
   u.horn.rotation.set(HORN_TILT, yaw, 0);
 }
@@ -297,6 +300,11 @@ export interface Herd {
   // Clear the meadow entirely (starting a fresh run).
   reset(): void;
   getHorsePartsForGibs(): GibParts;
+  // Run-scoped perk knobs (Fase 4), applied live to the standing herd + baked
+  // into subsequent spawns.
+  setSpeedMult(mult: number): void; // "slower unicorns" (× on top of difficulty)
+  setSizeMult(mult: number): void; // "bigger unicorns" (rescales bodies + horns)
+  setHornGlow(intensity: number): void; // "glowing horn" (shared horn emissive)
 }
 
 export interface WaveOpts {
@@ -336,6 +344,10 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
   // Difficulty knobs: later levels field a faster, twitchier herd.
   let speedMult = 1;
   let scareRadiusMult = 1;
+  // Run-scoped perk knobs (Fase 4), pushed in via setSpeedMult/setSizeMult and
+  // applied on top of the per-wave difficulty. 1 = no perk.
+  let perkSpeedMult = 1;
+  let perkSizeMult = 1;
 
   function spawnUnicorn(opts: { gallop?: boolean; entrance?: boolean } = {}): void {
     const model = cloneSkeleton(template);
@@ -364,8 +376,8 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
     });
 
     const inner = new THREE.Group();
-    inner.scale.setScalar(scale);
-    inner.position.y = -baseY;
+    inner.scale.setScalar(scale * perkSizeMult);
+    inner.position.y = -baseY * perkSizeMult;
     inner.rotation.y = -faceYaw; // align model forward to +Z
     inner.add(model);
 
@@ -379,7 +391,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
     // headroom once the herd is 60–100 strong.
     const horn = new THREE.Mesh(HORN_GEO, hornMat);
     horn.castShadow = false;
-    horn.scale.setScalar(HORN_WORLD_SIZE / HORN_NATIVE_H);
+    horn.scale.setScalar((HORN_WORLD_SIZE / HORN_NATIVE_H) * perkSizeMult);
     horn.rotation.order = "YXZ";
     scene.add(horn);
     const headBone = model.getObjectByName("Head") ?? inner;
@@ -420,12 +432,13 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
     const baseSpeed = galloping ? 6 + Math.random() * 3 : 1.8 + Math.random() * 1.2;
     const u: Unicorn = {
       wrapper,
+      inner,
       model,
       mesh,
       mixer,
       headBone,
       horn,
-      speed: baseSpeed * speedMult,
+      speed: baseSpeed * speedMult * perkSpeedMult,
       target,
       id: nextId++,
       flashMats,
@@ -493,7 +506,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         if (u.fleeTimer > 0) {
           u.fleeTimer -= dt;
           if (u.fleeTimer <= 0) {
-            u.speed = u.baseSpeed * speedMult;
+            u.speed = u.baseSpeed * speedMult * perkSpeedMult;
             u.gallopAction.timeScale = 1.1;
             setGait(u, u.restGait, 0.4);
             randomLandPoint(u.target);
@@ -521,7 +534,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         }
         g.position.y = terrainHeight(g.position.x, g.position.z);
 
-        placeHorn(u, g.rotation.y);
+        placeHorn(u, g.rotation.y, perkSizeMult);
       }
 
       // Advance electrocuted unicorns: convulse + flash in place, then explode.
@@ -546,7 +559,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         }
         // Keep the horn pinned to the (frozen, jittering) head.
         const yaw = g.rotation.y;
-        placeHorn(u, yaw);
+        placeHorn(u, yaw, perkSizeMult);
 
         if (d.t >= d.dur) {
           g.updateWorldMatrix(true, true);
@@ -669,7 +682,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       const gallopFraction = opts.gallopFraction ?? 0.5;
       // The knobs apply to the standing herd too, so a Zen top-up can't leave
       // old unicorns running at a stale difficulty.
-      for (const u of unicorns) if (u.fleeTimer <= 0) u.speed = u.baseSpeed * speedMult;
+      for (const u of unicorns) if (u.fleeTimer <= 0) u.speed = u.baseSpeed * speedMult * perkSpeedMult;
       for (let i = 0; i < count; i++) {
         spawnUnicorn({ gallop: Math.random() < gallopFraction, entrance: opts.entrances });
       }
@@ -687,5 +700,26 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       dying.length = 0;
     },
     getHorsePartsForGibs,
+    setSpeedMult(mult: number): void {
+      perkSpeedMult = mult;
+      // Re-apply to the standing herd — but not the ones mid-bolt: panic owns
+      // their speed until the flee timer burns off (then the burn-off re-applies).
+      for (const u of unicorns) if (u.fleeTimer <= 0) u.speed = u.baseSpeed * speedMult * mult;
+    },
+    setSizeMult(mult: number): void {
+      perkSizeMult = mult;
+      // Live-rescale the whole visible herd (roaming + convulsing) and their
+      // horns; placeHorn re-seats the offsets each frame from perkSizeMult.
+      const apply = (u: Unicorn): void => {
+        u.inner.scale.setScalar(scale * mult);
+        u.inner.position.y = -baseY * mult;
+        u.horn.scale.setScalar((HORN_WORLD_SIZE / HORN_NATIVE_H) * mult);
+      };
+      for (const u of unicorns) apply(u);
+      for (const d of dying) apply(d.unicorn);
+    },
+    setHornGlow(intensity: number): void {
+      hornMat.emissiveIntensity = intensity; // shared singleton → the whole herd at once
+    },
   };
 }
