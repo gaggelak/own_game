@@ -75,6 +75,11 @@
         background: linear-gradient(90deg, #b6f0ff, #49c8ff);
         box-shadow: 0 0 18px rgba(80, 200, 255, 0.7);
       }
+      #weapons button.active.unicorn {
+        color: #3c1030;
+        background: linear-gradient(90deg, #ffd1ec, #ff8ad0);
+        box-shadow: 0 0 18px rgba(255, 138, 208, 0.55);
+      }
       #weapons .key {
         opacity: 0.55;
         font-size: 11px;
@@ -676,17 +681,20 @@
     <div id="hud">
       <span id="count">🦄 × 14</span>
       <br />
-      WASD/QE — fly (shift = fast) · aim — mouse · hold — bigger blast ·
-      release — slam · right-drag — orbit · scroll — zoom · 1/2 — weapon · M —
-      mute
+      WASD/QE — fly (shift = fast) · grab a unicorn + flick — yeet it ·
+      meteor/water: hold — bigger blast, release — slam · right-drag — orbit ·
+      scroll — zoom · 1/2/3 — weapon · M — mute
     </div>
 
     <div id="weapons">
-      <button id="weapon-meteor" class="meteor active">
-        ☄️ Meteor<span class="key">1</span>
+      <button id="weapon-unicorn" class="unicorn active">
+        🖐️ Grab<span class="key">1</span>
+      </button>
+      <button id="weapon-meteor" class="meteor">
+        ☄️ Meteor<span class="key">2</span>
       </button>
       <button id="weapon-water" class="water">
-        ⚡ Water Ball<span class="key">2</span>
+        ⚡ Water Ball<span class="key">3</span>
       </button>
     </div>
 

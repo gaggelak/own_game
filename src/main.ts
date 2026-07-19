@@ -75,6 +75,7 @@ function leaveMenu(): void {
 document.getElementById("play-btn")!.addEventListener("click", () => {
   if (started) return;
   leaveMenu();
+  meteors.cancelCharge(); // releases a held unicorn BEFORE herd.reset() wipes the lists
   game.startRun(); // arms perks.beginRun() internally
   applyPerkMods(); // reset every system to identity for the fresh run
 });
@@ -279,6 +280,10 @@ const SCARE_FACTOR = 2.5; // panic reaches well beyond the kill radius
 // Domino perk (Fase 4): a meteor kill electrifies the survivor ring this far
 // beyond the crater; they convulse, then pop + cascade like a seeded water ball.
 const DOMINO_RING = 6;
+// Unicorn-grab (Fase 5): how far from the cursor ground point a unicorn can be
+// plucked, and how often the held/flying victim screams (sfx caps overlap at 2).
+const UNICORN_GRAB_RADIUS = 6;
+const GRAB_SCREAM_PERIOD = 1.4;
 
 // Hitstop: a big multi-kill freezes the simulation for a beat so the blast
 // lands like a punch. The camera + HUD keep running on real time through it —
@@ -387,6 +392,44 @@ function handleImpact(
         sfx,
       );
     }
+  } else if (kind === "unicorn") {
+    // Unicorn bowling (Fase 5): a live projectile, not an explosive — no
+    // crater, no fireball. A meaty thump: flattened grass, toppled props, a
+    // small kill ring, and gibs for the projectile plus anyone it bowled over.
+    flora.setImpact(point, radius * 1.1, 1, simTime);
+    const toppled = toppleNearbyProps(point, radius);
+    physics.applyRadialImpulse(point, radius, radius * 1.0); // between water 0.7 and meteor 1.3
+    const killed = herd.killAt(point, radius);
+    const victim = info.victim; // the thrown unicorn itself (+1 kill)
+    const total = killed.length + (victim ? 1 : 0);
+    if (total > 0) {
+      const parts = herd.getHorsePartsForGibs();
+      if (victim) gibs.spawn(victim, parts, point, radius, simTime);
+      for (const k of killed) gibs.spawn(k, parts, point, radius, simTime);
+    }
+    sfx.explosion(radius, total > 0); // small radius already plays it soft
+    if (game.canScoreBlast()) {
+      hud.applyEvents(
+        score.registerBlast({
+          point,
+          kills: total,
+          props: toppled,
+          charge: info.charge,
+          launchPos: info.launchPos,
+          bowling: true, // arms the UNICORN BOWLING sub-label (≥2 kills)
+        }),
+        sfx,
+      );
+      game.addTimeForKills(total);
+      perks.addKills(total);
+    }
+    // Domino perk stays consistent: kills electrify the survivor ring here too.
+    if (perks.mods().domino && total) {
+      const seeded = herd.electrocuteAt(point, radius + DOMINO_RING, 1);
+      for (const p of seeded) electro.zap(point, _zapTo.set(p.x, p.y + 1.5, p.z));
+      if (seeded.length) sfx.scream(seeded.length);
+    }
+    if (total >= HITSTOP_KILLS) triggerHitstop(total);
   } else {
     // Meteor: molten impact — crater + scorch, fireball, debris, toppled props,
     // a strong blast impulse, and a gory shatter for anything caught in it.
@@ -467,24 +510,52 @@ const meteors = await createMeteorSystem({
   physics,
   domElement: renderer.domElement,
   onImpact: handleImpact,
+  // Fase 5 bridge: the unicorn weapon plucks its projectile straight out of the
+  // herd (created below — closures resolve it lazily, same as handleImpact).
+  // Sound policy lives here so meteor.ts stays sfx-free: scream on the grab,
+  // then a periodic scream while held/flying.
+  grabUnicorn: (p) => {
+    const g = herd.grabAt(p, UNICORN_GRAB_RADIUS);
+    if (!g) return null;
+    sfx.scream(1);
+    let screamCd = GRAB_SCREAM_PERIOD;
+    return {
+      update(dt, pos, yaw) {
+        g.update(dt, pos, yaw);
+        screamCd -= dt;
+        if (screamCd <= 0) {
+          sfx.scream(1);
+          screamCd = GRAB_SCREAM_PERIOD;
+        }
+      },
+      release: () => g.release(),
+      kill: () => g.kill(),
+    };
+  },
 });
 
 // ---------------------------------------------------------------------------
-// Weapon switcher: top-center buttons (and number keys 1/2) pick which
-// projectile the god-hand hurls — the molten meteor or the electric water ball.
+// Weapon switcher: top-center buttons (and number keys 1/2/3). The bare hand
+// (grab a unicorn, flick to throw) is the DEFAULT weapon on 1; the meteor and
+// water ball are the big opt-in artillery on 2/3. Switching mid-hold is fine:
+// the in-progress gesture completes with its own kind.
 // ---------------------------------------------------------------------------
+const weaponUnicornBtn = document.getElementById("weapon-unicorn")!;
 const weaponMeteorBtn = document.getElementById("weapon-meteor")!;
 const weaponWaterBtn = document.getElementById("weapon-water")!;
 function setWeapon(kind: WeaponKind): void {
   meteors.setWeapon(kind);
+  weaponUnicornBtn.classList.toggle("active", kind === "unicorn");
   weaponMeteorBtn.classList.toggle("active", kind === "meteor");
   weaponWaterBtn.classList.toggle("active", kind === "waterball");
 }
+weaponUnicornBtn.addEventListener("click", () => setWeapon("unicorn"));
 weaponMeteorBtn.addEventListener("click", () => setWeapon("meteor"));
 weaponWaterBtn.addEventListener("click", () => setWeapon("waterball"));
 window.addEventListener("keydown", (e) => {
-  if (e.key === "1") setWeapon("meteor");
-  else if (e.key === "2") setWeapon("waterball");
+  if (e.key === "1") setWeapon("unicorn");
+  else if (e.key === "2") setWeapon("meteor");
+  else if (e.key === "3") setWeapon("waterball");
 });
 
 // ---------------------------------------------------------------------------
@@ -617,6 +688,24 @@ if (import.meta.env.DEV) {
     openPerkSelect,
     applyPerkMods,
     isPaused: () => paused,
+    /** World → client pixel coords, for dispatching synthetic PointerEvents. */
+    screenXY(x: number, z: number) {
+      const v = new THREE.Vector3(x, terrainHeight(x, z), z).project(camera);
+      const r = renderer.domElement.getBoundingClientRect();
+      return {
+        x: r.left + (v.x * 0.5 + 0.5) * r.width,
+        y: r.top + (-v.y * 0.5 + 0.5) * r.height,
+      };
+    },
+    /** Hand-crank one sim step (hidden tab = rAF paused): herd AI + physics +
+     *  meteors, in frame() order. Electro-pop resolution is discarded — use the
+     *  blast() path for pop-dependent tests. */
+    step(dt = 1 / 60) {
+      simTime += dt;
+      herd.update(dt, simTime);
+      physics.step(dt, simTime);
+      meteors.update(dt, simTime, dt);
+    },
     // The Browser pane runs hidden (rAF paused), so tests drive the sim by hand:
     // step physics + meteors manually, read the camera/controls band directly.
     meteors,
