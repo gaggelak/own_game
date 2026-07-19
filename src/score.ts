@@ -29,6 +29,7 @@ const LONG_SHOT_PTS = 300;
 const OVERKILL_PTS = 250; // full charge spent on a single unicorn — comedy tax refund
 const OVERKILL_CHARGE = 0.95;
 const DOMINO_PTS = 75; // × chain depth, per contagion pop
+const BOWLING_MIN_KILLS = 2; // thrown unicorn + ≥1 victim — a solo self-splat stays quiet
 const STREAK_WINDOW = 5; // seconds after a kill before the streak banks (at tier 0)
 const STREAK_DECAY = 0.85; // window shrinks by this per ladder rung climbed
 // Perk-granted extra streak seconds (Fase 4: "longer streak window"), added to
@@ -101,6 +102,8 @@ export interface BlastInfo {
   props: number;
   charge: number;
   launchPos: THREE.Vector3;
+  /** Fase 5: thrown-unicorn impact — arms the UNICORN BOWLING sub-label. */
+  bowling?: boolean;
 }
 
 export interface RunSummary {
@@ -322,6 +325,10 @@ export function createScore(): Score {
         longShot(info, out);
       }
       if (info.props > 0) award(info.props * PROP_POINTS, out, info.point);
+      // Pushed after OVERKILL/LONG SHOT so it wins the single sub-banner slot.
+      if (info.bowling && n >= BOWLING_MIN_KILLS) {
+        out.push({ kind: "sub", label: "UNICORN BOWLING" });
+      }
 
       // Kills and props both keep the chain breathing; only kills raise it.
       if (n > 0 || info.props > 0) touchChain();

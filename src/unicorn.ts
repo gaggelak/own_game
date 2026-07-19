@@ -164,6 +164,13 @@ const FLEE_BOUND = 70; // … while staying well inside the ±120 terrain
 const FLEE_ANGLES = [0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57, 2.09, -2.09];
 const GALLOP_FLEE_TIMESCALE = 1.35; // hooves keep up with the panicked ground speed
 
+// Fase 5: the god-hand. A grabbed unicorn gallops frantically in mid-air while
+// the player charges the throw — faster than any flee, plus a capped upright
+// wobble so it reads as squirming rather than ragdolling.
+const GRAB_GALLOP_TIMESCALE = 1.9; // frantic mid-air gallop, above the 1.35 flee pace
+const GRAB_WOBBLE_AMP = 0.22; // rad — pitch/roll flail while held/flying
+const GRAB_WOBBLE_SPEED = 9; // rad/s primary flail oscillation (roll runs at 1.7×)
+
 type Gait = "walk" | "gallop";
 
 interface Unicorn {
@@ -269,6 +276,21 @@ export interface KilledUnicorn {
   chainDepth: number; // how deep into a domino cascade this death was
 }
 
+// Fase 5: a unicorn in the god-hand. meteor.ts drives it as an opaque
+// projectile payload. All methods are idempotent — after kill() or release()
+// (or a herd.reset() that reclaimed it) the others become no-ops / return null.
+export interface GrabbedUnicorn {
+  // Move its feet-origin to `pos`, advance the squirm (mixer, wobble, horn).
+  // `yaw` = flight heading to turn toward, or null to keep facing (held).
+  update(dt: number, pos: THREE.Vector3, yaw: number | null): void;
+  // Gesture aborted: rejoin the roaming herd where it stands (snapped to
+  // terrain) and bolt in panic.
+  release(): void;
+  // It hit the ground: remove wrapper+horn, return the gib snapshot. Null if
+  // the unicorn was already reclaimed (a reset raced the flight).
+  kill(): KilledUnicorn | null;
+}
+
 // Rest-pose geometry for geometry-accurate gibs (cached once, shared).
 export interface GibParts {
   geometry: THREE.BufferGeometry; // merged triangle soup in model-root-local space
@@ -288,6 +310,11 @@ export interface Herd {
   electrocuteAt(point: THREE.Vector3, radius: number, chainDepth?: number): THREE.Vector3[];
   // Scatter the roaming herd away from an impact — the herding half of the game.
   scareAt(point: THREE.Vector3, radius: number): void;
+  // Fase 5: pluck the nearest roaming unicorn within `radius` of `point` out of
+  // the herd AI and hand it over. Null if none in range.
+  grabAt(point: THREE.Vector3, radius: number): GrabbedUnicorn | null;
+  // How many unicorns are currently in the god-hand (dev/verification).
+  heldCount(): number;
   // Visit every currently-electrified unicorn (for per-frame crackle VFX).
   forEachElectrified(cb: (x: number, y: number, z: number, height: number) => void): void;
   // Visit every roaming (still-alive, not-yet-doomed) unicorn.
@@ -340,6 +367,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
 
   const unicorns: Unicorn[] = []; // roaming, alive
   const dying: Dying[] = []; // electrocuted, standing + convulsing until they pop
+  const held: Unicorn[] = []; // Fase 5: in the god-hand (grabbed/flying) — still alive
   let nextId = 0;
   // Difficulty knobs: later levels field a faster, twitchier herd.
   let speedMult = 1;
@@ -658,6 +686,82 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         u.gallopAction.timeScale = GALLOP_FLEE_TIMESCALE;
       }
     },
+    grabAt(point: THREE.Vector3, radius: number): GrabbedUnicorn | null {
+      // Nearest roaming unicorn by 2D distance — dying ones are already doomed
+      // and can't be saved by the god-hand.
+      const r2 = radius * radius;
+      let best = -1;
+      let bestD2 = r2;
+      for (let i = 0; i < unicorns.length; i++) {
+        const p = unicorns[i].wrapper.position;
+        const dx = p.x - point.x;
+        const dz = p.z - point.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 <= bestD2) {
+          best = i;
+          bestD2 = d2;
+        }
+      }
+      if (best < 0) return null;
+      const u = unicorns[best];
+      unicorns.splice(best, 1);
+      held.push(u);
+      // Frantic mid-air gallop from the moment it's plucked.
+      setGait(u, "gallop", 0.1);
+      u.gallopAction.timeScale = GRAB_GALLOP_TIMESCALE;
+      let squirmT = Math.random() * Math.PI * 2; // desync flail phase between grabs
+      const idx = (): number => held.indexOf(u);
+      return {
+        update(dt: number, pos: THREE.Vector3, yaw: number | null): void {
+          if (idx() === -1) return;
+          squirmT += dt * GRAB_WOBBLE_SPEED;
+          u.mixer.update(dt);
+          u.wrapper.position.copy(pos);
+          if (yaw !== null) {
+            u.wrapper.rotation.y = approachAngle(u.wrapper.rotation.y, yaw, dt * 6);
+          }
+          u.wrapper.rotation.x = Math.sin(squirmT) * GRAB_WOBBLE_AMP;
+          u.wrapper.rotation.z = Math.cos(squirmT * 1.7) * GRAB_WOBBLE_AMP;
+          placeHorn(u, u.wrapper.rotation.y, perkSizeMult);
+        },
+        release(): void {
+          const i = idx();
+          if (i === -1) return;
+          held.splice(i, 1);
+          u.wrapper.rotation.x = 0;
+          u.wrapper.rotation.z = 0;
+          u.wrapper.position.y = terrainHeight(u.wrapper.position.x, u.wrapper.position.z);
+          unicorns.push(u);
+          // Dropped by a god-hand: reuse the panic machinery so it bolts off.
+          u.fleeTimer = FLEE_MIN + Math.random() * FLEE_VAR;
+          u.fleeFromX = u.wrapper.position.x;
+          u.fleeFromZ = u.wrapper.position.z;
+          u.speed =
+            Math.min(Math.max(u.baseSpeed * FLEE_SPEED_MULT, FLEE_SPEED_MIN), FLEE_SPEED_MAX) *
+            speedMult;
+          fleeTarget(u, Math.random() - 0.5, Math.random() - 0.5);
+          u.gallopAction.timeScale = GALLOP_FLEE_TIMESCALE;
+        },
+        kill(): KilledUnicorn | null {
+          const i = idx();
+          if (i === -1) return null;
+          held.splice(i, 1);
+          u.wrapper.updateWorldMatrix(true, true);
+          const snap: KilledUnicorn = {
+            position: u.wrapper.position.clone(),
+            heading: u.wrapper.rotation.y,
+            matrixWorld: u.model.matrixWorld.clone(),
+            chainDepth: 0,
+          };
+          u.mixer.stopAllAction();
+          scene.remove(u.wrapper, u.horn);
+          return snap;
+        },
+      };
+    },
+    heldCount() {
+      return held.length;
+    },
     forEachElectrified(cb: (x: number, y: number, z: number, height: number) => void): void {
       for (const d of dying) {
         const p = d.unicorn.wrapper.position;
@@ -671,10 +775,14 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       }
     },
     aliveCount() {
-      return unicorns.length + dying.length;
+      // A unicorn in the god-hand is still alive (keeps the HUD tally and the
+      // Zen top-up honest while one is being aimed).
+      return unicorns.length + dying.length + held.length;
     },
     roamingCount() {
-      return unicorns.length;
+      // Held/flying counts as "on its feet" for the win condition — it only
+      // leaves the count at kill(), i.e. when the throw lands.
+      return unicorns.length + held.length;
     },
     spawnWave(count: number, opts: WaveOpts = {}): void {
       speedMult = opts.speedMult ?? 1;
@@ -696,8 +804,14 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
         d.unicorn.mixer.stopAllAction();
         scene.remove(d.unicorn.wrapper, d.unicorn.horn);
       }
+      // Held ones too — a stale GrabbedUnicorn handle no-ops afterwards.
+      for (const u of held) {
+        u.mixer.stopAllAction();
+        scene.remove(u.wrapper, u.horn);
+      }
       unicorns.length = 0;
       dying.length = 0;
+      held.length = 0;
     },
     getHorsePartsForGibs,
     setSpeedMult(mult: number): void {
@@ -717,6 +831,7 @@ export async function createHerd(scene: THREE.Scene, count: number): Promise<Her
       };
       for (const u of unicorns) apply(u);
       for (const d of dying) apply(d.unicorn);
+      for (const u of held) apply(u);
     },
     setHornGlow(intensity: number): void {
       hornMat.emissiveIntensity = intensity; // shared singleton → the whole herd at once

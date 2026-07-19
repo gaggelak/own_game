@@ -75,6 +75,11 @@
         background: linear-gradient(90deg, #b6f0ff, #49c8ff);
         box-shadow: 0 0 18px rgba(80, 200, 255, 0.7);
       }
+      #weapons button.active.unicorn {
+        color: #3c1030;
+        background: linear-gradient(90deg, #ffd1ec, #ff8ad0);
+        box-shadow: 0 0 18px rgba(255, 138, 208, 0.55);
+      }
       #weapons .key {
         opacity: 0.55;
         font-size: 11px;
@@ -350,6 +355,10 @@
       #force-meter.water #force-fill {
         background: linear-gradient(90deg, #b6f0ff, #49c8ff);
         box-shadow: 0 0 10px rgba(80, 200, 255, 0.8);
+      }
+      #force-meter.unicorn #force-fill {
+        background: linear-gradient(90deg, #ffd1ec, #ff8ad0);
+        box-shadow: 0 0 10px rgba(255, 138, 208, 0.8);
       }
 
       /* ---- Kill-name banner (center) ------------------------------------ */
@@ -677,7 +686,7 @@
       <span id="count">🦄 × 14</span>
       <br />
       WASD/QE — fly (shift = fast) · aim — mouse · hold — bigger blast ·
-      release — slam · right-drag — orbit · scroll — zoom · 1/2 — weapon · M —
+      release — slam · right-drag — orbit · scroll — zoom · 1/2/3 — weapon · M —
       mute
     </div>
 
@@ -687,6 +696,9 @@
       </button>
       <button id="weapon-water" class="water">
         ⚡ Water Ball<span class="key">2</span>
+      </button>
+      <button id="weapon-unicorn" class="unicorn">
+        🦄 Unicorn<span class="key">3</span>
       </button>
     </div>
 

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { Physics, PhysicsHandle } from "./physics";
+import type { GrabbedUnicorn, KilledUnicorn } from "./unicorn";
 import { loadScene } from "./assets";
 import { terrainHeight } from "./terrain";
 import { softDot } from "./textures";
@@ -59,6 +60,14 @@ const RADIUS_PER_SPEED = 0.08;
 const RADIUS_MIN = 8;
 const RADIUS_MAX = 22;
 
+// Unicorn bowling (Fase 5): a deliberately SMALL, near-fixed slam. No speed
+// term — a cross-meadow throw must not outgrow "bowling".
+const UNI_BASE_RADIUS = 4.5;
+const UNI_CHARGE_RADIUS = 2; // full charge: 6.5
+const UNI_RADIUS_MIN = 4.5;
+const UNI_RADIUS_MAX = 6.5;
+const GRAB_LIFT_TIME = 0.28; // s: eased ride from the meadow up to the throw anchor
+
 const FRAGS = 16; // loose rocks/droplets that spiral in and merge INTO the ball while charging
 const EMBERS = 26;
 
@@ -73,11 +82,14 @@ const ARC_SEG = ARC_BOLTS * ARC_SUB;
 // stone coalescing rather than hand-built primitives.
 const CHUNK_URL = "/models/nature/rock_smallB.glb"; // the gathering rocks
 
-// The god-hand can hurl two projectiles: the molten "meteor" and an "waterball"
-// — a crackling electric water orb that electrocutes unicorns on impact. Both
-// share all the gesture/physics/trail machinery below; only the orb's look and
-// the impact effect (dispatched to main.ts via onImpact's `kind`) differ.
-export type WeaponKind = "meteor" | "waterball";
+// The god-hand can hurl three projectiles: the molten "meteor", the "waterball"
+// — a crackling electric water orb that electrocutes unicorns on impact — and
+// (Fase 5) a live "unicorn" plucked straight out of the herd. All share the
+// gesture/physics/trail machinery below; only the projectile's look and the
+// impact effect (dispatched to main.ts via onImpact's `kind`) differ. The
+// unicorn's "orb" is invisible (showBody: false): the grabbed unicorn itself,
+// driven through the GrabbedUnicorn handle, is the visible projectile.
+export type WeaponKind = "meteor" | "waterball" | "unicorn";
 
 export interface MeteorSystem {
   /** dt is sim time (freezes with hitstop); dtReal drives the charge gesture. */
@@ -100,6 +112,9 @@ export interface MeteorSystem {
 export interface ImpactInfo {
   charge: number; // 0..1
   launchPos: THREE.Vector3;
+  // kind "unicorn": the thrown victim's kill snapshot, for gibs + the +1 kill.
+  // Undefined if the herd reclaimed it mid-flight (a reset raced the throw).
+  victim?: KilledUnicorn;
 }
 
 export interface MeteorOpts {
@@ -115,6 +130,9 @@ export interface MeteorOpts {
     kind: WeaponKind,
     info: ImpactInfo,
   ) => void;
+  // Fase 5 bridge: pluck a unicorn near the cursor ground point. Absent (or
+  // returning null) ⇒ the unicorn-weapon gesture refuses to start.
+  grabUnicorn?: (groundPoint: THREE.Vector3) => GrabbedUnicorn | null;
 }
 
 // Meteor sprites share the base gradient but sit at midStop 0.4 with a warm
@@ -289,6 +307,7 @@ interface Flying {
   handle: PhysicsHandle;
   charge: number;
   launchPos: THREE.Vector3; // cloned at launch; the orb's own position moves
+  grabbed: GrabbedUnicorn | null; // Fase 5: the live payload riding the orb body
 }
 
 const _ndc = new THREE.Vector2();
@@ -296,10 +315,12 @@ const _groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _hit = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
+const _grabPt = new THREE.Vector3(); // cursor ground point at grab time
+const _grabPos = new THREE.Vector3(); // per-frame position fed to the grabbed unicorn
 const _trailC = new THREE.Color(); // scratch; per-weapon trail colours live in WEAPONS
 
 export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem> {
-  const { scene, camera, controls, physics, domElement, onImpact } = opts;
+  const { scene, camera, controls, physics, domElement, onImpact, grabUnicorn } = opts;
   const RAPIER = physics.RAPIER;
   const raycaster = new THREE.Raycaster();
   // Trail/particle sprites — warm for the meteor, cool for the water ball.
@@ -307,6 +328,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   const emberDot = makeSoftDot("rgba(255,240,200,1)", "rgba(255,150,60,0.9)");
   const trailDotWater = makeSoftDot("rgba(255,255,255,1)", "rgba(150,220,255,0.85)", "rgba(40,120,255,0)");
   const sparkDot = makeSoftDot("rgba(255,255,255,1)", "rgba(130,220,255,0.9)", "rgba(40,120,255,0)");
+  const trailDotPink = makeSoftDot("rgba(255,255,255,1)", "rgba(255,170,220,0.85)", "rgba(255,120,200,0)");
 
   // The core is a faceted BALL (low-poly icosphere, so it stays cohesive with
   // the scene's flat-shaded look while reading clearly as a sphere). Shared by
@@ -354,6 +376,11 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     trailCold: THREE.Color;
     hasArcs: boolean;
     previewColor: number; // tint for the trajectory arc + landing ring
+    // false = the orb itself is invisible (unicorn: the grabbed unicorn IS the
+    // projectile) — no core/halo/frags/embers, only the trail + previews.
+    showBody: boolean;
+    trailSize: number; // world-space size of the trail dots
+    rainbowTrail?: boolean; // pastel HSL ramp instead of the hot→cold lerp
   }
   const WEAPONS: Record<WeaponKind, WeaponVisual> = {
     meteor: {
@@ -379,6 +406,8 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       trailCold: new THREE.Color(0x661500),
       hasArcs: false,
       previewColor: 0xffa050,
+      showBody: true,
+      trailSize: 2.2,
     },
     waterball: {
       makeCore(glow) {
@@ -405,6 +434,28 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       trailCold: new THREE.Color(0x0a3a66),
       hasArcs: true,
       previewColor: 0x55d8ff,
+      showBody: true,
+      trailSize: 2.2,
+    },
+    unicorn: {
+      // The projectile is the grabbed unicorn itself — the orb renders nothing.
+      // fragGeo/fragMat/emberTex are never shown (showBody gates them all out).
+      makeCore() {
+        return new THREE.MeshStandardMaterial({ visible: false });
+      },
+      fragGeo: dropGeo,
+      fragMat: dropMat,
+      emberTex: sparkDot,
+      emberColor: 0xffb3e0,
+      haloColor: 0xff8ad0,
+      trailTex: trailDotPink,
+      trailHot: new THREE.Color(0xffe3f4), // fallback only — rainbowTrail paints the trail
+      trailCold: new THREE.Color(0xb04a86),
+      hasArcs: false,
+      previewColor: 0xff8ad0,
+      showBody: false,
+      trailSize: 1.6,
+      rainbowTrail: true,
     },
   };
 
@@ -433,12 +484,14 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       blending: THREE.AdditiveBlending,
       fog: false,
     });
-    group.add(new THREE.Mesh(haloGeo, haloMat));
+    if (wv.showBody) group.add(new THREE.Mesh(haloGeo, haloMat));
 
     // Loose bits that orbit, spiral inward and merge into the ball as it charges
-    // (rocks for the meteor, water droplets for the water ball).
+    // (rocks for the meteor, water droplets for the water ball). A bodiless
+    // weapon (unicorn) carries none at all.
     const frags: Frag[] = [];
-    for (let f = 0; f < FRAGS; f++) {
+    const fragCount = wv.showBody ? FRAGS : 0;
+    for (let f = 0; f < fragCount; f++) {
       const m = new THREE.Mesh(wv.fragGeo, wv.fragMat);
       const base = 0.2 + Math.random() * 0.28;
       m.scale.setScalar(base);
@@ -525,7 +578,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const trail = new THREE.Points(
       tGeo,
       new THREE.PointsMaterial({
-        size: 2.2,
+        size: wv.trailSize,
         map: wv.trailTex,
         vertexColors: true,
         transparent: true,
@@ -565,10 +618,11 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
   // One pool per weapon. POOL_SIZE each is plenty: only one orb charges at a
   // time and at most MAX_FLYING are airborne across both weapons combined.
-  const pools: Record<WeaponKind, Orb[]> = { meteor: [], waterball: [] };
+  const pools: Record<WeaponKind, Orb[]> = { meteor: [], waterball: [], unicorn: [] };
   for (let i = 0; i < POOL_SIZE; i++) {
     pools.meteor.push(buildOrb("meteor"));
     pools.waterball.push(buildOrb("waterball"));
+    pools.unicorn.push(buildOrb("unicorn"));
   }
   let currentWeapon: WeaponKind = "meteor";
 
@@ -695,6 +749,35 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   let radiusScale = 1;
   let chargeScale = 1;
 
+  // Fase 5: the unicorn payload of the CHARGING gesture (flying ones ride their
+  // Flying record instead).
+  let grabbedCharge: GrabbedUnicorn | null = null;
+  let grabLift = 0; // 0..1 eased ride from the meadow up to the anchor
+  const grabStart = new THREE.Vector3(); // where it was plucked
+
+  // The ONE blast-radius formula, shared by the preview ring and both detonation
+  // paths so the ring stays a promise. Meteor/water grow with charge + impact
+  // speed (bit-identical to the pre-Fase 5 math); the unicorn is a small,
+  // near-fixed slam with no speed term.
+  function blastRadius(kind: WeaponKind, charge: number, speed: number): number {
+    if (kind === "unicorn") {
+      return (
+        THREE.MathUtils.clamp(
+          UNI_BASE_RADIUS + charge * UNI_CHARGE_RADIUS,
+          UNI_RADIUS_MIN,
+          UNI_RADIUS_MAX,
+        ) * radiusScale
+      );
+    }
+    return (
+      THREE.MathUtils.clamp(
+        BASE_RADIUS + charge * CHARGE_RADIUS + speed * RADIUS_PER_SPEED,
+        RADIUS_MIN,
+        RADIUS_MAX,
+      ) * radiusScale
+    );
+  }
+
   // Cursor → ground point, remembering the last good one so a sky-aim frame
   // doesn't blank the target (hurl keeps slamming at the meadow's edge).
   function aimPoint(cx: number, cy: number, out: THREE.Vector3): boolean {
@@ -807,12 +890,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
     // Landing ring, sized by the EXACT radius formula the detonation uses —
     // the ring is a promise, not an estimate.
-    const radius =
-      THREE.MathUtils.clamp(
-        BASE_RADIUS + force * CHARGE_RADIUS + _landV * RADIUS_PER_SPEED,
-        RADIUS_MIN,
-        RADIUS_MAX,
-      ) * radiusScale;
+    const radius = blastRadius(charging.kind, force, _landV);
     for (let i = 0; i < RING_DOTS; i++) {
       const a = (i / RING_DOTS) * Math.PI * 2;
       const x = _land.x + Math.cos(a) * radius;
@@ -862,6 +940,23 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (e.button !== 0 || charging) return;
     const orb = acquire(currentWeapon);
     if (!orb) return;
+    // Unicorn weapon: the gesture only starts if a real ground point under the
+    // ACTUAL cursor (no lastGround fallback) has a grabbable unicorn near it —
+    // otherwise the press is a dead click and nothing conjures.
+    if (orb.kind === "unicorn") {
+      if (!grabUnicorn || !groundUnder(e.clientX, e.clientY, _grabPt)) {
+        orb.free = true;
+        return;
+      }
+      const g = grabUnicorn(_grabPt);
+      if (!g) {
+        orb.free = true;
+        return;
+      }
+      grabbedCharge = g;
+      grabLift = 0;
+      grabStart.copy(_grabPt);
+    }
     // LMB can never orbit (mouseButtons.LEFT = null in main.ts); just make sure
     // the menu's idle auto-rotate is off the moment the first throw starts.
     controls.autoRotate = false;
@@ -882,7 +977,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     orb.group.scale.setScalar(0.6);
     orb.group.rotation.set(0, 0, 0);
     orb.trail.visible = false;
-    orb.embers.visible = true;
+    orb.embers.visible = WEAPONS[orb.kind].showBody;
     orb.core.scale.setScalar(0.5); // a small seed that grows as the bits merge in
     for (const f of orb.frags) f.mesh.visible = true;
     if (orb.arcs) orb.arcs.visible = true;
@@ -898,6 +993,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (forceMeter) {
       forceMeter.classList.add("show");
       forceMeter.classList.toggle("water", orb.kind === "waterball");
+      forceMeter.classList.toggle("unicorn", orb.kind === "unicorn");
     }
     updatePreview();
   }
@@ -920,21 +1016,18 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     const p = rec.handle.body.translation();
     const v = rec.handle.body.linvel();
     _tmp.set(v.x, v.y, v.z);
-    const radius =
-      THREE.MathUtils.clamp(
-        BASE_RADIUS + rec.charge * CHARGE_RADIUS + _tmp.length() * RADIUS_PER_SPEED,
-        RADIUS_MIN,
-        RADIUS_MAX,
-      ) * radiusScale;
+    const radius = blastRadius(rec.orb.kind, rec.charge, _tmp.length());
     _hit.set(p.x, terrainHeight(p.x, p.z), p.z);
+    const victim = rec.grabbed ? rec.grabbed.kill() ?? undefined : undefined;
     onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
       charge: rec.charge,
       launchPos: rec.launchPos,
+      victim,
     });
     physics.remove(rec.handle); // onExpire splices flying + parks the orb
   }
 
-  function launch(orb: Orb): void {
+  function launch(orb: Orb, grabbed: GrabbedUnicorn | null): void {
     while (flying.length >= MAX_FLYING) detonateOldest();
     const spawn = orb.group.position;
     // charge == force: the same floored 0..1 that sized the preview, so
@@ -984,6 +1077,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       orb,
       charge,
       launchPos: spawn.clone(), // `spawn` is the orb's live position — snapshot it
+      grabbed,
       handle: {
         body,
         object: orb.group,
@@ -991,6 +1085,10 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         bornAt: lastTime,
         maxLife: 7,
         onExpire: () => {
+          // Belt-and-braces for the (unreachable) maxLife eviction: a payload
+          // that never detonated returns to the herd. Idempotent — after a
+          // normal detonation kill() already emptied the handle.
+          grabbed?.release();
           const idx = flying.indexOf(rec);
           if (idx !== -1) flying.splice(idx, 1);
           park(orb);
@@ -1005,6 +1103,8 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (!charging) return;
     const orb = charging;
     charging = null;
+    const g = grabbedCharge; // hand the payload over (or back) below
+    grabbedCharge = null;
     if (pointerId !== -1) {
       try { domElement.releasePointerCapture(pointerId); } catch { /* ignore */ }
       pointerId = -1;
@@ -1013,8 +1113,9 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     previewRing.visible = false;
     if (forceMeter) forceMeter.classList.remove("show");
     if (launchIt) {
-      launch(orb);
+      launch(orb, g);
     } else {
+      g?.release(); // aborted grab: the unicorn rejoins the herd and bolts
       park(orb);
     }
   }
@@ -1040,12 +1141,19 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   window.addEventListener("blur", onBlur);
 
   function paintTrail(orb: Orb): void {
-    const { trailHot, trailCold } = WEAPONS[orb.kind];
+    const wv = WEAPONS[orb.kind];
     const h = orb.head;
     for (let a = 0; a < TRAIL_LEN; a++) {
       const i = (h - a + TRAIL_LEN) % TRAIL_LEN;
       const k = 1 - a / TRAIL_LEN;
-      _trailC.copy(trailCold).lerp(trailHot, k * k);
+      if (wv.rainbowTrail) {
+        // Unicorn: a pastel rainbow down the tail (pink head → violet → blue →
+        // green tail), moderate saturation + fading lightness so the additive
+        // dots sparkle instead of smearing white.
+        _trailC.setHSL(0.92 - (1 - k) * 0.75, 0.55, 0.2 + 0.45 * k * k);
+      } else {
+        _trailC.copy(wv.trailCold).lerp(wv.trailHot, k * k);
+      }
       orb.trailCol[i * 3] = _trailC.r;
       orb.trailCol[i * 3 + 1] = _trailC.g;
       orb.trailCol[i * 3 + 2] = _trailC.b;
@@ -1067,45 +1175,54 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         holdTime += dtReal;
         anchorPos(charging.group.position); // stay glued to the slot through WASD/zoom
         const k = Math.min(holdTime / (CHARGE_TIME * chargeScale), 1);
-        const pulse = 0.85 + 0.15 * Math.sin(holdTime * 18);
-        charging.coreGlow.value = (0.9 + k * 1.3) * pulse;
-        charging.haloMat.opacity = (0.06 + k * 0.12) * pulse;
-        charging.group.scale.setScalar(0.6 + k * 0.6);
-        charging.group.rotation.y += dtReal * 0.9;
-        // The ball itself swells from a small seed as it swallows the rock.
-        const coreScale = 0.5 + 0.5 * k;
-        charging.core.scale.setScalar(coreScale);
+        if (WEAPONS[charging.kind].showBody) {
+          const pulse = 0.85 + 0.15 * Math.sin(holdTime * 18);
+          charging.coreGlow.value = (0.9 + k * 1.3) * pulse;
+          charging.haloMat.opacity = (0.06 + k * 0.12) * pulse;
+          charging.group.scale.setScalar(0.6 + k * 0.6);
+          charging.group.rotation.y += dtReal * 0.9;
+          // The ball itself swells from a small seed as it swallows the rock.
+          const coreScale = 0.5 + 0.5 * k;
+          charging.core.scale.setScalar(coreScale);
 
-        // Each rock orbits, then makes a staggered plunge inward and melts into
-        // the ball — it shrinks to nothing as it reaches the molten surface, so
-        // the whole loose cloud gathers into one clean sphere by full charge.
-        const surface = ORB_R * coreScale;
-        for (const fr of charging.frags) {
-          fr.ang += dtReal * fr.spin;
-          const kp = Math.min(Math.max((k - fr.t0) / (1 - fr.t0), 0), 1); // this rock's own plunge 0..1
-          const ease = kp * kp * (3 - 2 * kp);
-          const rad = fr.rad * (1 - ease) + surface * 0.9 * ease;
-          fr.mesh.position.set(Math.cos(fr.ang) * rad, fr.y * (1 - ease), Math.sin(fr.ang) * rad);
-          fr.mesh.rotation.x += dtReal * fr.spin * 0.5;
-          fr.mesh.scale.setScalar(fr.base * (1 - ease)); // melts away as it lands
-          fr.mesh.visible = ease < 0.985;
-        }
-        // Embers swirl up off the molten surface.
-        const pos = charging.embers.geometry.attributes.position as THREE.BufferAttribute;
-        const arr = pos.array as Float32Array;
-        for (let e = 0; e < EMBERS; e++) {
-          charging.emAng[e] += dtReal * charging.emSpin[e];
-          charging.emY[e] += dtReal * charging.emVy[e];
-          if (charging.emY[e] > 3) charging.emY[e] = -1.2;
-          const rad = charging.emRad[e] * (0.7 + 0.3 * k);
-          arr[e * 3] = Math.cos(charging.emAng[e]) * rad;
-          arr[e * 3 + 1] = charging.emY[e];
-          arr[e * 3 + 2] = Math.sin(charging.emAng[e]) * rad;
-        }
-        pos.needsUpdate = true;
+          // Each rock orbits, then makes a staggered plunge inward and melts into
+          // the ball — it shrinks to nothing as it reaches the molten surface, so
+          // the whole loose cloud gathers into one clean sphere by full charge.
+          const surface = ORB_R * coreScale;
+          for (const fr of charging.frags) {
+            fr.ang += dtReal * fr.spin;
+            const kp = Math.min(Math.max((k - fr.t0) / (1 - fr.t0), 0), 1); // this rock's own plunge 0..1
+            const ease = kp * kp * (3 - 2 * kp);
+            const rad = fr.rad * (1 - ease) + surface * 0.9 * ease;
+            fr.mesh.position.set(Math.cos(fr.ang) * rad, fr.y * (1 - ease), Math.sin(fr.ang) * rad);
+            fr.mesh.rotation.x += dtReal * fr.spin * 0.5;
+            fr.mesh.scale.setScalar(fr.base * (1 - ease)); // melts away as it lands
+            fr.mesh.visible = ease < 0.985;
+          }
+          // Embers swirl up off the molten surface.
+          const pos = charging.embers.geometry.attributes.position as THREE.BufferAttribute;
+          const arr = pos.array as Float32Array;
+          for (let e = 0; e < EMBERS; e++) {
+            charging.emAng[e] += dtReal * charging.emSpin[e];
+            charging.emY[e] += dtReal * charging.emVy[e];
+            if (charging.emY[e] > 3) charging.emY[e] = -1.2;
+            const rad = charging.emRad[e] * (0.7 + 0.3 * k);
+            arr[e * 3] = Math.cos(charging.emAng[e]) * rad;
+            arr[e * 3 + 1] = charging.emY[e];
+            arr[e * 3 + 2] = Math.sin(charging.emAng[e]) * rad;
+          }
+          pos.needsUpdate = true;
 
-        // Water ball: arcs crackle louder as it charges.
-        if (charging.arcs) updateOrbArcs(charging);
+          // Water ball: arcs crackle louder as it charges.
+          if (charging.arcs) updateOrbArcs(charging);
+        } else {
+          // God-hand unicorn: no accretion show — ease the squirming victim up
+          // from where it was plucked to the anchor slot, then keep it glued.
+          grabLift = Math.min(grabLift + dtReal / GRAB_LIFT_TIME, 1);
+          const kg = grabLift * grabLift * (3 - 2 * grabLift);
+          _grabPos.copy(grabStart).lerp(charging.group.position, kg);
+          grabbedCharge?.update(dtReal, _grabPos, null);
+        }
 
         // Re-solve + redraw the arc, ring and meter for this frame's aim/force.
         updatePreview();
@@ -1132,8 +1249,16 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       for (let i = flying.length - 1; i >= 0; i--) {
         const rec = flying[i];
         const p = rec.handle.body.translation();
-        rec.orb.group.rotation.x += dt * 5;
-        rec.orb.group.rotation.z += dt * 2;
+        if (rec.grabbed) {
+          // The victim IS the projectile: glue it to the (invisible) orb body
+          // and let it gallop facing its flight path. Sim dt — it's physics.
+          const lv = rec.handle.body.linvel();
+          _grabPos.set(p.x, p.y, p.z);
+          rec.grabbed.update(dt, _grabPos, Math.atan2(lv.x, lv.z));
+        } else {
+          rec.orb.group.rotation.x += dt * 5;
+          rec.orb.group.rotation.z += dt * 2;
+        }
         rec.orb.head = (rec.orb.head + 1) % TRAIL_LEN;
         rec.orb.trailPos[rec.orb.head * 3] = p.x;
         rec.orb.trailPos[rec.orb.head * 3 + 1] = p.y;
@@ -1149,16 +1274,13 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
           const v = rec.handle.body.linvel();
           _tmp.set(v.x, v.y, v.z);
           const speed = _tmp.length();
-          const radius =
-            THREE.MathUtils.clamp(
-              BASE_RADIUS + rec.charge * CHARGE_RADIUS + speed * RADIUS_PER_SPEED,
-              RADIUS_MIN,
-              RADIUS_MAX,
-            ) * radiusScale;
+          const radius = blastRadius(rec.orb.kind, rec.charge, speed);
           _hit.set(p.x, groundY, p.z);
+          const victim = rec.grabbed ? rec.grabbed.kill() ?? undefined : undefined;
           onImpact(_hit.clone(), _tmp.clone(), radius, rec.orb.kind, {
             charge: rec.charge,
             launchPos: rec.launchPos,
+            victim,
           });
           physics.remove(rec.handle); // onExpire parks the orb + splices `flying`
         }
@@ -1192,7 +1314,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       previewArcMat.dispose();
       previewRingMat.dispose();
       hoverMat.dispose();
-      if (forceMeter) forceMeter.classList.remove("show", "water");
+      if (forceMeter) forceMeter.classList.remove("show", "water", "unicorn");
     },
   };
 }
