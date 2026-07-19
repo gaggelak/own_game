@@ -535,27 +535,27 @@ const meteors = await createMeteorSystem({
 });
 
 // ---------------------------------------------------------------------------
-// Weapon switcher: top-center buttons (and number keys 1/2/3) pick which
-// projectile the god-hand hurls — the molten meteor, the electric water ball,
-// or (Fase 5) a live unicorn plucked from the herd. Switching mid-hold is fine:
+// Weapon switcher: top-center buttons (and number keys 1/2/3). The bare hand
+// (grab a unicorn, flick to throw) is the DEFAULT weapon on 1; the meteor and
+// water ball are the big opt-in artillery on 2/3. Switching mid-hold is fine:
 // the in-progress gesture completes with its own kind.
 // ---------------------------------------------------------------------------
+const weaponUnicornBtn = document.getElementById("weapon-unicorn")!;
 const weaponMeteorBtn = document.getElementById("weapon-meteor")!;
 const weaponWaterBtn = document.getElementById("weapon-water")!;
-const weaponUnicornBtn = document.getElementById("weapon-unicorn")!;
 function setWeapon(kind: WeaponKind): void {
   meteors.setWeapon(kind);
+  weaponUnicornBtn.classList.toggle("active", kind === "unicorn");
   weaponMeteorBtn.classList.toggle("active", kind === "meteor");
   weaponWaterBtn.classList.toggle("active", kind === "waterball");
-  weaponUnicornBtn.classList.toggle("active", kind === "unicorn");
 }
+weaponUnicornBtn.addEventListener("click", () => setWeapon("unicorn"));
 weaponMeteorBtn.addEventListener("click", () => setWeapon("meteor"));
 weaponWaterBtn.addEventListener("click", () => setWeapon("waterball"));
-weaponUnicornBtn.addEventListener("click", () => setWeapon("unicorn"));
 window.addEventListener("keydown", (e) => {
-  if (e.key === "1") setWeapon("meteor");
-  else if (e.key === "2") setWeapon("waterball");
-  else if (e.key === "3") setWeapon("unicorn");
+  if (e.key === "1") setWeapon("unicorn");
+  else if (e.key === "2") setWeapon("meteor");
+  else if (e.key === "3") setWeapon("waterball");
 });
 
 // ---------------------------------------------------------------------------

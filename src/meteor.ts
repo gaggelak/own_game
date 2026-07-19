@@ -60,13 +60,26 @@ const RADIUS_PER_SPEED = 0.08;
 const RADIUS_MIN = 8;
 const RADIUS_MAX = 22;
 
-// Unicorn bowling (Fase 5): a deliberately SMALL, near-fixed slam. No speed
-// term — a cross-meadow throw must not outgrow "bowling".
+// Unicorn bowling (Fase 5): a deliberately SMALL slam — a touch harder on a
+// monster flick, but it must never outgrow "bowling".
 const UNI_BASE_RADIUS = 4.5;
-const UNI_CHARGE_RADIUS = 2; // full charge: 6.5
+const UNI_RADIUS_PER_SPEED = 0.025;
 const UNI_RADIUS_MIN = 4.5;
 const UNI_RADIUS_MAX = 6.5;
-const GRAB_LIFT_TIME = 0.28; // s: eased ride from the meadow up to the throw anchor
+
+// Bare-hand carry + flick (Fase 5): the unicorn weapon is DIRECT MANIPULATION,
+// not artillery. Grab a unicorn and it dangles under the cursor at CARRY_H,
+// chased with an exponential spring (the lag IS the ragdoll feel). The throw is
+// the mouse itself: the cursor's world velocity over the last FLICK_WINDOW
+// becomes the launch velocity. A gentle release is a drop — it survives.
+const CARRY_H = 5; // dangle height above the cursor's ground point
+const CARRY_SMOOTH = 12; // /s exponential chase toward the cursor
+const FLICK_WINDOW = 0.12; // s of cursor history that defines the flick
+const FLICK_GAIN = 1.15; // world-velocity multiplier on the flick
+const FLICK_UP_FRACTION = 0.35; // upward bias as a fraction of horizontal speed
+const FLICK_UP_MAX = 30;
+const THROW_MIN_SPEED = 14; // below this the release is a gentle drop — it survives
+const FLICK_MAX_SPEED = 110; // wild swipes clamp near the hurl weapons' pace
 
 const FRAGS = 16; // loose rocks/droplets that spiral in and merge INTO the ball while charging
 const EMBERS = 26;
@@ -82,13 +95,14 @@ const ARC_SEG = ARC_BOLTS * ARC_SUB;
 // stone coalescing rather than hand-built primitives.
 const CHUNK_URL = "/models/nature/rock_smallB.glb"; // the gathering rocks
 
-// The god-hand can hurl three projectiles: the molten "meteor", the "waterball"
-// — a crackling electric water orb that electrocutes unicorns on impact — and
-// (Fase 5) a live "unicorn" plucked straight out of the herd. All share the
-// gesture/physics/trail machinery below; only the projectile's look and the
-// impact effect (dispatched to main.ts via onImpact's `kind`) differ. The
-// unicorn's "orb" is invisible (showBody: false): the grabbed unicorn itself,
-// driven through the GrabbedUnicorn handle, is the visible projectile.
+// Three weapons. "unicorn" (Fase 5) is the DEFAULT: bare-hand direct
+// manipulation — grab a live unicorn, drag it dangling under the cursor, and
+// FLICK the mouse to throw it (no charge, no preview; the mouse is the physics).
+// "meteor" and "waterball" are the big opt-in artillery pieces sharing the
+// charge/anchor/preview hurl gesture. All three share the flight/trail/
+// detonation machinery; the impact effect dispatches to main.ts via onImpact's
+// `kind`. The unicorn's "orb" is invisible (showBody: false): the grabbed
+// unicorn itself, driven through the GrabbedUnicorn handle, is the projectile.
 export type WeaponKind = "meteor" | "waterball" | "unicorn";
 
 export interface MeteorSystem {
@@ -624,7 +638,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     pools.waterball.push(buildOrb("waterball"));
     pools.unicorn.push(buildOrb("unicorn"));
   }
-  let currentWeapon: WeaponKind = "meteor";
+  let currentWeapon: WeaponKind = "unicorn"; // the bare hand is the default weapon
 
   function acquire(kind: WeaponKind): Orb | null {
     for (const o of pools[kind]) if (o.free) { o.free = false; return o; }
@@ -750,20 +764,22 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   let chargeScale = 1;
 
   // Fase 5: the unicorn payload of the CHARGING gesture (flying ones ride their
-  // Flying record instead).
+  // Flying record instead), plus the cursor ground-point history (realClock-
+  // stamped, pruned to FLICK_WINDOW) the flick velocity is read from at release.
   let grabbedCharge: GrabbedUnicorn | null = null;
-  let grabLift = 0; // 0..1 eased ride from the meadow up to the anchor
-  const grabStart = new THREE.Vector3(); // where it was plucked
+  const flickT: number[] = [];
+  const flickX: number[] = [];
+  const flickZ: number[] = [];
 
   // The ONE blast-radius formula, shared by the preview ring and both detonation
   // paths so the ring stays a promise. Meteor/water grow with charge + impact
-  // speed (bit-identical to the pre-Fase 5 math); the unicorn is a small,
-  // near-fixed slam with no speed term.
+  // speed (bit-identical to the pre-Fase 5 math); the unicorn is a small slam
+  // that only nudges up with flick speed (no charge concept at all).
   function blastRadius(kind: WeaponKind, charge: number, speed: number): number {
     if (kind === "unicorn") {
       return (
         THREE.MathUtils.clamp(
-          UNI_BASE_RADIUS + charge * UNI_CHARGE_RADIUS,
+          UNI_BASE_RADIUS + speed * UNI_RADIUS_PER_SPEED,
           UNI_RADIUS_MIN,
           UNI_RADIUS_MAX,
         ) * radiusScale
@@ -954,8 +970,6 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         return;
       }
       grabbedCharge = g;
-      grabLift = 0;
-      grabStart.copy(_grabPt);
     }
     // LMB can never orbit (mouseButtons.LEFT = null in main.ts); just make sure
     // the menu's idle auto-rotate is off the moment the first throw starts.
@@ -972,12 +986,24 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     lastCursorY = e.clientY;
     hoverMarker.visible = false;
 
+    if (orb.kind === "unicorn") {
+      // Bare-hand carry: no anchor, no previews, no meter — the cursor IS the
+      // hand. The spring in update() lifts it from the pluck point.
+      orb.group.position.copy(_grabPt);
+      orb.group.rotation.set(0, 0, 0);
+      orb.trail.visible = false;
+      flickT.length = 0;
+      flickX.length = 0;
+      flickZ.length = 0;
+      return;
+    }
+
     anchorPos(_hit);
     orb.group.position.copy(_hit);
     orb.group.scale.setScalar(0.6);
     orb.group.rotation.set(0, 0, 0);
     orb.trail.visible = false;
-    orb.embers.visible = WEAPONS[orb.kind].showBody;
+    orb.embers.visible = true;
     orb.core.scale.setScalar(0.5); // a small seed that grows as the bits merge in
     for (const f of orb.frags) f.mesh.visible = true;
     if (orb.arcs) orb.arcs.visible = true;
@@ -993,7 +1019,6 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
     if (forceMeter) {
       forceMeter.classList.add("show");
       forceMeter.classList.toggle("water", orb.kind === "waterball");
-      forceMeter.classList.toggle("unicorn", orb.kind === "unicorn");
     }
     updatePreview();
   }
@@ -1030,13 +1055,43 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
   function launch(orb: Orb, grabbed: GrabbedUnicorn | null): void {
     while (flying.length >= MAX_FLYING) detonateOldest();
     const spawn = orb.group.position;
-    // charge == force: the same floored 0..1 that sized the preview, so
-    // ImpactInfo.charge keeps its meaning for the scorer.
-    const charge = THREE.MathUtils.clamp(holdTime / (CHARGE_TIME * chargeScale), MIN_FORCE, 1);
-    // throwVel is the arc the player was just shown (updatePreview runs every
-    // charging frame, and once in onDown) — fire THAT, not a re-solve, so the
-    // landing ring is honoured. The re-solve here is unreachable insurance.
-    if (!throwValid) computeThrow(lastCursorX, lastCursorY, spawn);
+    let charge: number;
+    if (orb.kind === "unicorn") {
+      // The throw IS the mouse: cursor world velocity over the flick window.
+      let vx = 0;
+      let vz = 0;
+      const nS = flickT.length;
+      if (nS >= 2) {
+        const dtw = flickT[nS - 1] - flickT[0];
+        if (dtw > 1e-3) {
+          vx = ((flickX[nS - 1] - flickX[0]) / dtw) * FLICK_GAIN;
+          vz = ((flickZ[nS - 1] - flickZ[0]) / dtw) * FLICK_GAIN;
+        }
+      }
+      let speed = Math.hypot(vx, vz);
+      if (speed < THROW_MIN_SPEED) {
+        // A gentle release is a drop, not a throw — it lands and bolts away.
+        grabbed?.release();
+        park(orb);
+        return;
+      }
+      if (speed > FLICK_MAX_SPEED) {
+        const s = FLICK_MAX_SPEED / speed;
+        vx *= s;
+        vz *= s;
+        speed = FLICK_MAX_SPEED;
+      }
+      throwVel.set(vx, Math.min(speed * FLICK_UP_FRACTION, FLICK_UP_MAX), vz);
+      charge = 0; // no charge concept — keeps OVERKILL honest, radius rides speed
+    } else {
+      // charge == force: the same floored 0..1 that sized the preview, so
+      // ImpactInfo.charge keeps its meaning for the scorer.
+      charge = THREE.MathUtils.clamp(holdTime / (CHARGE_TIME * chargeScale), MIN_FORCE, 1);
+      // throwVel is the arc the player was just shown (updatePreview runs every
+      // charging frame, and once in onDown) — fire THAT, not a re-solve, so the
+      // landing ring is honoured. The re-solve here is unreachable insurance.
+      if (!throwValid) computeThrow(lastCursorX, lastCursorY, spawn);
+    }
 
     orb.group.scale.setScalar(0.6 + charge * 0.6);
     orb.core.scale.setScalar(1); // launches as a complete ball (arcs keep crackling in flight)
@@ -1173,9 +1228,9 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
         // and the accretion show must stay butter-smooth even while a hitstop
         // freezes the sim. (Orbs in FLIGHT stay on sim dt below — they're physics.)
         holdTime += dtReal;
-        anchorPos(charging.group.position); // stay glued to the slot through WASD/zoom
-        const k = Math.min(holdTime / (CHARGE_TIME * chargeScale), 1);
         if (WEAPONS[charging.kind].showBody) {
+          anchorPos(charging.group.position); // stay glued to the slot through WASD/zoom
+          const k = Math.min(holdTime / (CHARGE_TIME * chargeScale), 1);
           const pulse = 0.85 + 0.15 * Math.sin(holdTime * 18);
           charging.coreGlow.value = (0.9 + k * 1.3) * pulse;
           charging.haloMat.opacity = (0.06 + k * 0.12) * pulse;
@@ -1215,17 +1270,29 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
 
           // Water ball: arcs crackle louder as it charges.
           if (charging.arcs) updateOrbArcs(charging);
-        } else {
-          // God-hand unicorn: no accretion show — ease the squirming victim up
-          // from where it was plucked to the anchor slot, then keep it glued.
-          grabLift = Math.min(grabLift + dtReal / GRAB_LIFT_TIME, 1);
-          const kg = grabLift * grabLift * (3 - 2 * grabLift);
-          _grabPos.copy(grabStart).lerp(charging.group.position, kg);
-          grabbedCharge?.update(dtReal, _grabPos, null);
-        }
 
-        // Re-solve + redraw the arc, ring and meter for this frame's aim/force.
-        updatePreview();
+          // Re-solve + redraw the arc, ring and meter for this frame's aim/force.
+          updatePreview();
+        } else {
+          // Bare-hand carry: chase the cursor's ground point at dangle height
+          // with an exponential spring (the lag IS the ragdoll feel), and log
+          // the cursor's recent motion — the flick that decides the throw.
+          if (aimPoint(lastCursorX, lastCursorY, _tmp)) {
+            flickT.push(realClock);
+            flickX.push(_tmp.x);
+            flickZ.push(_tmp.z);
+            while (flickT.length > 1 && realClock - flickT[0] > FLICK_WINDOW) {
+              flickT.shift();
+              flickX.shift();
+              flickZ.shift();
+            }
+            _tmp.y += CARRY_H;
+          } else {
+            _tmp.copy(charging.group.position);
+          }
+          charging.group.position.lerp(_tmp, 1 - Math.exp(-dtReal * CARRY_SMOOTH));
+          grabbedCharge?.update(dtReal, charging.group.position, null);
+        }
       }
 
       // Aim marker between gestures: a small slowly-spinning dotted ring under
@@ -1314,7 +1381,7 @@ export async function createMeteorSystem(opts: MeteorOpts): Promise<MeteorSystem
       previewArcMat.dispose();
       previewRingMat.dispose();
       hoverMat.dispose();
-      if (forceMeter) forceMeter.classList.remove("show", "water", "unicorn");
+      if (forceMeter) forceMeter.classList.remove("show", "water");
     },
   };
 }
